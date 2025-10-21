@@ -6,11 +6,18 @@
 
 #include "framework.h"
 #include "Otiose.h"
+#include <objidl.h>
+#include <gdiplus.h>
+#pragma comment(lib,"gdiplus.lib")
 #include <string>
 #include <fstream>
 #include <ctime>
 #include <sstream>
 #include <iomanip>
+#include <algorithm>
+
+using namespace Gdiplus;
+using std::min;
 
 #define MAX_LOADSTRING 100
 
@@ -21,10 +28,10 @@
 struct Shift {
     std::string employeeName;
     std::string employeeID;
-	time_t clockInTime;
-	time_t clockOutTime;
+    time_t clockInTime;
+    time_t clockOutTime;
     double hoursWorked;
-    bool isActive; // true if clocked in, flase if clocked out
+    bool isActive = false; // true if clocked in, false if clocked out
 };
 
 // Global Variables:
@@ -35,6 +42,7 @@ WCHAR szWindowClass[MAX_LOADSTRING];            // the main window class name
 // Clock In/Out System Variables
 Shift currentShift;
 HWND hClockToggleBtn, hStatusText;
+ULONG_PTR gdiplusToken; // For GDI+ initialization
 const std::string EMPLOYEE_NAME = "Alexa Culley"; // Placeholder, using me for now to track internship hours
 const std::string EMPLOYEE_ID = "EMP001";         // Placeholder ID
 const std::string TIMESHEET_FILE = "timesheet.csv";
@@ -62,6 +70,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     UNREFERENCED_PARAMETER(hPrevInstance);
     UNREFERENCED_PARAMETER(lpCmdLine);
 
+	// Initialize GDI+
+	GdiplusStartupInput gdiplusStartupInput;
+	GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, NULL);
+
     // Initialize global strings
 	LoadStringW(hInstance, IDS_APP_TITLE, szTitle, MAX_LOADSTRING);
 	LoadStringW(hInstance, IDC_OTIOSE, szWindowClass, MAX_LOADSTRING);
@@ -81,6 +93,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 	// Perform application initialization:
     if (!InitInstance(hInstance, nCmdShow))
     {
+        GdiplusShutdown(gdiplusToken);
         return FALSE;
     }
 
@@ -97,6 +110,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
             DispatchMessage(&msg);
         }
     }
+
+	// Shutdown GDI+
+	GdiplusShutdown(gdiplusToken);
 
     return (int) msg.wParam;
 }
@@ -126,7 +142,7 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
    hInst = hInstance; // Store instance handle in our global variable
 
    HWND hWnd = CreateWindowW(szWindowClass, szTitle, WS_OVERLAPPEDWINDOW,
-      CW_USEDEFAULT, 0, 600, 400, nullptr, nullptr, hInstance, nullptr);
+      CW_USEDEFAULT, 0, 1750, 1000, nullptr, nullptr, hInstance, nullptr);
 
    if (!hWnd)
    {
@@ -137,14 +153,14 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
    hClockToggleBtn = CreateWindowW(
        L"BUTTON", L"Clock In",
        WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
-       50, 50, 150, 120, // make it square so the circle fits properly
+       125, 50, 150, 120, // make it square so the circle fits properly
        hWnd, (HMENU)IDC_CLOCK_TOGGLE_BTN, hInstance, nullptr);
 
    // Create Status text display
    hStatusText = CreateWindowW(
        L"STATIC", L"Status: Currently Clocked Out", 
        WS_VISIBLE | WS_CHILD | SS_LEFT,
-       50, 190, 500, 200, 
+       50, 190, 300, 200, 
 	   hWnd, nullptr, hInstance, nullptr);
 
    ShowWindow(hWnd, nCmdShow);
@@ -170,6 +186,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                     ClockOut();
 					UpdateStatusDisplay(hWnd);
                     SetWindowTextW(hClockToggleBtn, L"Clock In");
+					InvalidateRect(hClockToggleBtn, NULL, TRUE); // Force button redraw
                 }
                 else
                 {
@@ -177,6 +194,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                     ClockIn();
 					UpdateStatusDisplay(hWnd);
                     SetWindowTextW(hClockToggleBtn, L"Clock Out");
+                    InvalidateRect(hClockToggleBtn, NULL, TRUE); // Force button redraw
                 }
 				break;
 
@@ -343,32 +361,41 @@ void DrawColoredButton(LPDRAWITEMSTRUCT pDIS)
     HDC hdc = pDIS->hDC;
     RECT rect = pDIS->rcItem;
 
+	// Clear the background first to prevent any artifacts
+    HBRUSH hBackBrush = (HBRUSH)GetStockObject(WHITE_BRUSH);
+	FillRect(hdc, &rect, hBackBrush);
+
+	// Create GDI+ Graphics object for smoother rendering
+	Graphics graphics(hdc);
+    graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+    graphics.SetCompositingQuality(CompositingQualityHighQuality); // Better quality rendering
+    graphics.SetPixelOffsetMode(PixelOffsetModeHighQuality); // smoother pixel rendering
+
 	// Determine button color based on current state
-    COLORREF buttonColor;
-    COLORREF borderColor;
-	COLORREF textColor = RGB(255, 255, 255); // White text
+    Color buttonColor;
+    Color borderColor;
 
     if (currentShift.isActive)
     {
         // Clocked In - show red clock out button
-        buttonColor = RGB(220, 53, 69); // Crimson Red
-		borderColor = RGB(180, 43, 59); // Darker Red for border
+        buttonColor = Color(255, 220, 53, 69); // Crimson Red (A, R, G, B)
+		borderColor = Color(255, 180, 43, 59); // Darker Red for border
     }
     else
     {
         // Clocked Out - show blue clock in button
-        buttonColor = RGB(13, 110, 253); // Nice Blue color
-		borderColor = RGB(10, 88, 202); // Darker Blue for border
+        buttonColor = Color(255, 13, 110, 253); // Nice Blue color
+		borderColor = Color(255, 10, 88, 202); // Darker Blue for border
     }
 
     // Check if button is being pressed
     if (pDIS->itemState & ODS_SELECTED)
     {
         // Darken color when pressed
-		int r = (int)(GetRValue(buttonColor) * 0.8);
-		int g = (int)(GetGValue(buttonColor) * 0.8);
-		int b = (int)(GetBValue(buttonColor) * 0.8);
-		buttonColor = RGB(r, g, b);
+        BYTE r = (BYTE)(buttonColor.GetR() * 0.8);
+        BYTE g = (BYTE)(buttonColor.GetG() * 0.8);
+        BYTE b = (BYTE)(buttonColor.GetB() * 0.8);
+        buttonColor = Color(255, r, g, b);
 	}
 
     // Calculate center and radius for the circle
@@ -379,69 +406,45 @@ void DrawColoredButton(LPDRAWITEMSTRUCT pDIS)
 	int centerY = rect.top + height / 2;
 	int radius = diameter / 2 - 5; // Padding of 5 pixels
 
-    // Create circular region for the button
-    HRGN hRegion = CreateEllipticRgn(
-        centerX - radius, centerY - radius,
-		centerX + radius, centerY + radius
-    );
+    // Draw the filled circle
+    SolidBrush brush(buttonColor);
+    graphics.FillEllipse(&brush,
+        centerX - radius,
+		centerY - radius, 
+		diameter - 10, // preserving the padding with 10 pixels
+		diameter - 10);
 
-    // Clip to the circular region
-	SelectClipRgn(hdc, hRegion);
-
-    // Fill the circle with the button color
-	HBRUSH hBrush = CreateSolidBrush(buttonColor);
-	HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, hBrush);
-	HPEN hPen = CreatePen(PS_SOLID, 1, borderColor);
-	HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
-
-	Ellipse(hdc, centerX - radius, centerY - radius, 
-        centerX + radius, centerY + radius);
-
-    SelectObject(hdc, hOldPen);
-	SelectObject(hdc, hOldBrush);
-	DeleteObject(hPen);
-    DeleteObject(hBrush);
-
-    // Draw border circle
-	HPEN hBorderPen = CreatePen(PS_SOLID, 3, borderColor);
-	hOldPen = (HPEN)SelectObject(hdc, hPen);
-    SelectObject(hdc, hBorderPen);
-	SelectObject(hdc, GetStockObject(NULL_BRUSH)); // No fill for border
-
-    Ellipse(hdc, centerX - radius, centerY - radius, 
-		centerX + radius, centerY + radius);
-    
-	SelectObject(hdc, hOldPen);
-	DeleteObject(hBorderPen);
-
-	// Remove clipping region
-	SelectClipRgn(hdc, NULL);
-	DeleteObject(hRegion);
+    // Draw the border circle
+    Pen borderPen(borderColor, 3.0f);
+    graphics.DrawEllipse(&borderPen,
+		centerX - radius,
+		centerY - radius,
+		diameter - 10,
+		diameter - 10);
 
     // Draw the button text
     WCHAR buttonText[32];
-	GetWindowTextW(pDIS->hwndItem, buttonText, 32);
+    GetWindowTextW(pDIS->hwndItem, buttonText, 32);
 
-    SetTextColor(hdc, textColor);
-    SetBkMode(hdc, TRANSPARENT);
+    // Set up text rendering
+	FontFamily fontFamily(L"Arial");
+	Font font(&fontFamily, 16, FontStyleBold, UnitPixel);
+	SolidBrush textBrush(Color(255, 255, 255, 255)); // White text
 
-    // Create a font for the button
-    HFONT hFont = CreateFontW(
-        16, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Arial"
+    // Center the text
+	StringFormat stringFormat;
+	stringFormat.SetAlignment(StringAlignmentCenter);
+	stringFormat.SetLineAlignment(StringAlignmentCenter);
+
+    RectF layoutRect(
+        (REAL)(centerX - radius),
+        (REAL)(centerY - radius),
+        (REAL)(diameter - 10),
+        (REAL)(diameter - 10)
     );
-	HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
 
-    // Create a rect for the text centered in the circle
-    RECT textRect;
-	textRect.left = centerX - radius;
-	textRect.top = centerY - radius;
-	textRect.right = centerX + radius;
-	textRect.bottom = centerY + radius;
+    // enable text anti-aliasing
+	graphics.SetTextRenderingHint(TextRenderingHintAntiAlias);
 
-	DrawTextW(hdc, buttonText, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-    SelectObject(hdc, hOldFont);
-    DeleteObject(hFont);
+    graphics.DrawString(buttonText, -1, &font, layoutRect, &stringFormat, &textBrush);
 }
