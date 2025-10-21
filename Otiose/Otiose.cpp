@@ -2,7 +2,7 @@
 // This program is built for The UPS Store to help manage various aspects of the business.
 // This program will be used as my Capstone Internship Project for my Cybersecurity degree at Spokane Falls Community College. 
 // 
-// Fun Fact: Otiose means "lazy" or "idle", which I thought was funny/ironic for a management app :)
+// Fun Fact: Otiose means something/someone is "lazy" or "idle" and serves no practical purpose, which I thought was a funny/ironic name for a management app :)
 
 #include "framework.h"
 #include "Otiose.h"
@@ -43,6 +43,7 @@ WCHAR szWindowClass[MAX_LOADSTRING];            // the main window class name
 Shift currentShift;
 HWND hClockToggleBtn, hStatusText;
 ULONG_PTR gdiplusToken; // For GDI+ initialization
+HFONT hStatusFont; // Font for status text
 const std::string EMPLOYEE_NAME = "Alexa Culley"; // Placeholder, using me for now to track internship hours
 const std::string EMPLOYEE_ID = "EMP001";         // Placeholder ID
 const std::string TIMESHEET_FILE = "timesheet.csv";
@@ -129,8 +130,11 @@ ATOM MyRegisterClass(HINSTANCE hInstance)
     wcex.hInstance      = hInstance;
     wcex.hIcon          = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_OTIOSE));
     wcex.hCursor        = LoadCursor(nullptr, IDC_ARROW);
-    wcex.hbrBackground  = (HBRUSH)(COLOR_WINDOW+1);
-    wcex.lpszMenuName   = MAKEINTRESOURCEW(IDC_OTIOSE);
+
+	// Create a dark background brush to give the app an overall dark theme
+	wcex.hbrBackground = CreateSolidBrush(RGB(30, 30, 35)); // Dark grey/blue background
+    
+    wcex.lpszMenuName   = nullptr;
     wcex.lpszClassName  = szWindowClass;
     wcex.hIconSm        = LoadIcon(wcex.hInstance, MAKEINTRESOURCE(IDI_SMALL));
 
@@ -162,6 +166,13 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
        WS_VISIBLE | WS_CHILD | SS_LEFT,
        50, 190, 300, 200, 
 	   hWnd, nullptr, hInstance, nullptr);
+
+   // Create a font for the status text
+   hStatusFont = CreateFontW(
+       18, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+       DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+       CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI"
+   );
 
    ShowWindow(hWnd, nCmdShow);
    UpdateWindow(hWnd);
@@ -199,11 +210,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 				break;
 
             case IDM_ABOUT:
-                DialogBox(hInst, MAKEINTRESOURCE(IDD_ABOUTBOX), hWnd, About);
+				// Removed About - keeping in case of future use
+                // DialogBox(hInst, MAKEINTRESOURCE(IDD_ABOUTBOX), hWnd, About);
                 break;
 
             case IDM_EXIT:
-                DestroyWindow(hWnd);
+				// Removed Menu - keeping in case of future use
+                // DestroyWindow(hWnd);
                 break;
 
             default:
@@ -224,11 +237,24 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     }
 	break;
 
+    case WM_CTLCOLORSTATIC:
+    {
+		// Make the status text white for better visibility on the dark background
+        HDC hdcStatic = (HDC)wParam;
+        SetTextColor(hdcStatic, RGB(255, 255, 255)); // White text
+        SetBkColor(hdcStatic, RGB(30, 30, 35)); // Match window background
+
+        if (!GetStockObject(NULL_BRUSH))
+            return (LRESULT)GetStockObject(NULL_BRUSH);
+        
+		static HBRUSH hbrBkgnd = CreateSolidBrush(RGB(30, 30, 35));
+		return (LRESULT)hbrBkgnd;
+    }
+
     case WM_PAINT:
         {
             PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hWnd, &ps);
-            // TODO: Add any drawing code that uses hdc here...
             EndPaint(hWnd, &ps);
         }
         break;
@@ -362,7 +388,7 @@ void DrawColoredButton(LPDRAWITEMSTRUCT pDIS)
     RECT rect = pDIS->rcItem;
 
 	// Clear the background first to prevent any artifacts
-    HBRUSH hBackBrush = (HBRUSH)GetStockObject(WHITE_BRUSH);
+    HBRUSH hBackBrush = CreateSolidBrush(RGB(30, 30, 35));
 	FillRect(hdc, &rect, hBackBrush);
 
 	// Create GDI+ Graphics object for smoother rendering
