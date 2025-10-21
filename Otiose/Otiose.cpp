@@ -4,9 +4,6 @@
 // 
 // Fun Fact: Otiose means "lazy" or "idle", which I thought was funny/ironic for a management app :)
 
-// Otiose.cpp : Defines the entry point for the application.
-//
-
 #include "framework.h"
 #include "Otiose.h"
 #include <string>
@@ -18,8 +15,7 @@
 #define MAX_LOADSTRING 100
 
 // Button IDs
-#define IDC_CLOCK_IN_BTN 1001
-#define IDC_CLOCK_OUT_BTN 1002
+#define IDC_CLOCK_TOGGLE_BTN 1001
 
 // Shift structure
 struct Shift {
@@ -38,7 +34,7 @@ WCHAR szWindowClass[MAX_LOADSTRING];            // the main window class name
 
 // Clock In/Out System Variables
 Shift currentShift;
-HWND hClockInBtn, hClockOutBtn, hStatusText;
+HWND hClockToggleBtn, hStatusText;
 const std::string EMPLOYEE_NAME = "Alexa Culley"; // Placeholder, using me for now to track internship hours
 const std::string EMPLOYEE_ID = "EMP001";         // Placeholder ID
 const std::string TIMESHEET_FILE = "timesheet.csv";
@@ -56,6 +52,7 @@ void UpdateStatusDisplay(HWND hWnd);
 void SaveShiftToCSV(const Shift& shift);
 std::string TimeToString(time_t t);
 void InitializeCSV();
+void DrawColoredButton(LPDRAWITEMSTRUCT pDIS);
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                      _In_opt_ HINSTANCE hPrevInstance,
@@ -104,18 +101,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     return (int) msg.wParam;
 }
 
-
-//
-//  FUNCTION: MyRegisterClass()
-//
-//  PURPOSE: Registers the window class.
-//
 ATOM MyRegisterClass(HINSTANCE hInstance)
 {
     WNDCLASSEXW wcex;
 
     wcex.cbSize = sizeof(WNDCLASSEX);
-
     wcex.style          = CS_HREDRAW | CS_VREDRAW;
     wcex.lpfnWndProc    = WndProc;
     wcex.cbClsExtra     = 0;
@@ -131,53 +121,31 @@ ATOM MyRegisterClass(HINSTANCE hInstance)
     return RegisterClassExW(&wcex);
 }
 
-//
-//   FUNCTION: InitInstance(HINSTANCE, int)
-//
-//   PURPOSE: Saves instance handle and creates main window
-//
-//   COMMENTS:
-//
-//        In this function, we save the instance handle in a global variable and
-//        create and display the main program window.
-//
 BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
 {
    hInst = hInstance; // Store instance handle in our global variable
 
    HWND hWnd = CreateWindowW(szWindowClass, szTitle, WS_OVERLAPPEDWINDOW,
       CW_USEDEFAULT, 0, 600, 400, nullptr, nullptr, hInstance, nullptr);
-   // HWND hWnd = CreateWindowW(szWindowClass, szTitle, WS_OVERLAPPEDWINDOW,
-   // CW_USEDEFAULT, 0, CW_USEDEFAULT, 0, nullptr, nullptr, hInstance, nullptr);
 
    if (!hWnd)
    {
       return FALSE;
    }
 
-   // Create Clock In button
-   hClockInBtn = CreateWindowW(
-       L"BUTTON", L"Clock In", 
-       WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON,
-	   50, 50, 150, 40, 
-       hWnd, (HMENU)IDC_CLOCK_IN_BTN, hInstance, nullptr);
-
-   // Create Clock Out button
-   hClockOutBtn = CreateWindowW(
-       L"BUTTON", L"Clock Out", 
-       WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON,
-       220, 50, 150, 40, 
-	   hWnd, (HMENU)IDC_CLOCK_OUT_BTN, hInstance, nullptr);
+   // Create Clock Toggle button
+   hClockToggleBtn = CreateWindowW(
+       L"BUTTON", L"Clock In",
+       WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
+       50, 50, 150, 120, // make it square so the circle fits properly
+       hWnd, (HMENU)IDC_CLOCK_TOGGLE_BTN, hInstance, nullptr);
 
    // Create Status text display
    hStatusText = CreateWindowW(
        L"STATIC", L"Status: Currently Clocked Out", 
        WS_VISIBLE | WS_CHILD | SS_LEFT,
-       50, 120, 500, 200, 
+       50, 190, 500, 200, 
 	   hWnd, nullptr, hInstance, nullptr);
-
-   // Disable Clock Out button initially
-   EnableWindow(hClockOutBtn, FALSE);
 
    ShowWindow(hWnd, nCmdShow);
    UpdateWindow(hWnd);
@@ -185,16 +153,6 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
    return TRUE;
 }
 
-//
-//  FUNCTION: WndProc(HWND, UINT, WPARAM, LPARAM)
-//
-//  PURPOSE: Processes messages for the main window.
-//
-//  WM_COMMAND  - process the application menu
-//  WM_PAINT    - Paint the main window
-//  WM_DESTROY  - post a quit message and return
-//
-//
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     switch (message)
@@ -205,18 +163,21 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             // Parse the menu selections:
             switch (wmId)
             {
-            case IDC_CLOCK_IN_BTN:
-                ClockIn();
-				UpdateStatusDisplay(hWnd);
-                EnableWindow(hClockInBtn, FALSE);
-				EnableWindow(hClockOutBtn, TRUE);
-                break;
-
-			case IDC_CLOCK_OUT_BTN:
-                ClockOut();
-				UpdateStatusDisplay(hWnd);
-				EnableWindow(hClockInBtn, TRUE);
-                EnableWindow(hClockOutBtn, FALSE);
+            case IDC_CLOCK_TOGGLE_BTN:
+                if (currentShift.isActive)
+                {
+                    // Currently clocked in, so clock out
+                    ClockOut();
+					UpdateStatusDisplay(hWnd);
+                    SetWindowTextW(hClockToggleBtn, L"Clock In");
+                }
+                else
+                {
+                    // Currently clocked out, so clock in
+                    ClockIn();
+					UpdateStatusDisplay(hWnd);
+                    SetWindowTextW(hClockToggleBtn, L"Clock Out");
+                }
 				break;
 
             case IDM_ABOUT:
@@ -232,6 +193,18 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             }
         }
         break;
+
+    case WM_DRAWITEM:
+    {
+        // Handle drawing the colored button
+        LPDRAWITEMSTRUCT pDIS = (LPDRAWITEMSTRUCT)lParam;
+        if (pDIS->CtlID == IDC_CLOCK_TOGGLE_BTN)
+        {
+            DrawColoredButton(pDIS);
+            return TRUE;
+        }
+    }
+	break;
 
     case WM_PAINT:
         {
@@ -252,7 +225,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     return 0;
 }
 
-// Message handler for about box.
 INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
 {
     UNREFERENCED_PARAMETER(lParam);
@@ -298,6 +270,7 @@ void ClockOut()
 void UpdateStatusDisplay(HWND hWnd)
 {
     std::wstringstream status;
+
     if (currentShift.isActive)
     {
         status << L"Status: Currently Clocked In\n\n";
@@ -310,7 +283,8 @@ void UpdateStatusDisplay(HWND hWnd)
         status << L"Employee: " << EMPLOYEE_NAME.c_str() << L"\n";
 		status << L"Clock In Time: " << TimeToString(currentShift.clockInTime).c_str() << L"\n";
         status << L"Clock Out Time: " << TimeToString(currentShift.clockOutTime).c_str() << L"\n";
-		status << L"Hours Worked: " << std::fixed << std::setprecision(2) << currentShift.hoursWorked << L" hours\n";
+		status << L"Hours Worked: " << std::fixed << std::setprecision(2) 
+            << currentShift.hoursWorked << L" hours\n";
     }
     else
     {
@@ -362,4 +336,112 @@ void InitializeCSV()
         }
     }
     checkFile.close();
+}
+
+void DrawColoredButton(LPDRAWITEMSTRUCT pDIS)
+{
+    HDC hdc = pDIS->hDC;
+    RECT rect = pDIS->rcItem;
+
+	// Determine button color based on current state
+    COLORREF buttonColor;
+    COLORREF borderColor;
+	COLORREF textColor = RGB(255, 255, 255); // White text
+
+    if (currentShift.isActive)
+    {
+        // Clocked In - show red clock out button
+        buttonColor = RGB(220, 53, 69); // Crimson Red
+		borderColor = RGB(180, 43, 59); // Darker Red for border
+    }
+    else
+    {
+        // Clocked Out - show blue clock in button
+        buttonColor = RGB(13, 110, 253); // Nice Blue color
+		borderColor = RGB(10, 88, 202); // Darker Blue for border
+    }
+
+    // Check if button is being pressed
+    if (pDIS->itemState & ODS_SELECTED)
+    {
+        // Darken color when pressed
+		int r = (int)(GetRValue(buttonColor) * 0.8);
+		int g = (int)(GetGValue(buttonColor) * 0.8);
+		int b = (int)(GetBValue(buttonColor) * 0.8);
+		buttonColor = RGB(r, g, b);
+	}
+
+    // Calculate center and radius for the circle
+	int width = rect.right - rect.left;
+	int height = rect.bottom - rect.top;
+    int diameter = min(width, height);
+	int centerX = rect.left + width / 2;
+	int centerY = rect.top + height / 2;
+	int radius = diameter / 2 - 5; // Padding of 5 pixels
+
+    // Create circular region for the button
+    HRGN hRegion = CreateEllipticRgn(
+        centerX - radius, centerY - radius,
+		centerX + radius, centerY + radius
+    );
+
+    // Clip to the circular region
+	SelectClipRgn(hdc, hRegion);
+
+    // Fill the circle with the button color
+	HBRUSH hBrush = CreateSolidBrush(buttonColor);
+	HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, hBrush);
+	HPEN hPen = CreatePen(PS_SOLID, 1, borderColor);
+	HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
+
+	Ellipse(hdc, centerX - radius, centerY - radius, 
+        centerX + radius, centerY + radius);
+
+    SelectObject(hdc, hOldPen);
+	SelectObject(hdc, hOldBrush);
+	DeleteObject(hPen);
+    DeleteObject(hBrush);
+
+    // Draw border circle
+	HPEN hBorderPen = CreatePen(PS_SOLID, 3, borderColor);
+	hOldPen = (HPEN)SelectObject(hdc, hPen);
+    SelectObject(hdc, hBorderPen);
+	SelectObject(hdc, GetStockObject(NULL_BRUSH)); // No fill for border
+
+    Ellipse(hdc, centerX - radius, centerY - radius, 
+		centerX + radius, centerY + radius);
+    
+	SelectObject(hdc, hOldPen);
+	DeleteObject(hBorderPen);
+
+	// Remove clipping region
+	SelectClipRgn(hdc, NULL);
+	DeleteObject(hRegion);
+
+    // Draw the button text
+    WCHAR buttonText[32];
+	GetWindowTextW(pDIS->hwndItem, buttonText, 32);
+
+    SetTextColor(hdc, textColor);
+    SetBkMode(hdc, TRANSPARENT);
+
+    // Create a font for the button
+    HFONT hFont = CreateFontW(
+        16, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Arial"
+    );
+	HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
+
+    // Create a rect for the text centered in the circle
+    RECT textRect;
+	textRect.left = centerX - radius;
+	textRect.top = centerY - radius;
+	textRect.right = centerX + radius;
+	textRect.bottom = centerY + radius;
+
+	DrawTextW(hdc, buttonText, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    SelectObject(hdc, hOldFont);
+    DeleteObject(hFont);
 }
