@@ -69,7 +69,7 @@ const int TAB_BAR_HEIGHT = 50;
 const int TOGGLE_BTN_WIDTH = 30;
 
 // Placeholder Employee Info
-const std::string EMPLOYEE_NAME = "Alexa Culley"; // Placeholder, using me for now to track internship hours
+const std::string EMPLOYEE_NAME = "Toastiiieee"; // Placeholder, using me for now to track internship hours
 const std::string EMPLOYEE_ID = "EMP001";         // Placeholder ID
 const std::string TIMESHEET_FILE = "timesheet.csv";
 
