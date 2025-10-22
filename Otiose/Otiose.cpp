@@ -69,7 +69,7 @@ const int TAB_BAR_HEIGHT = 50;
 const int TOGGLE_BTN_WIDTH = 30;
 
 // Placeholder Employee Info
-const std::string EMPLOYEE_NAME = "Alexa Culley"; // Placeholder, using me for now to track internship hours
+const std::string EMPLOYEE_NAME = "Toastiiieee"; // Placeholder, using me for now to track internship hours
 const std::string EMPLOYEE_ID = "EMP001";         // Placeholder ID
 const std::string TIMESHEET_FILE = "timesheet.csv";
 
@@ -89,7 +89,7 @@ void InitializeCSV();
 void DrawColoredButton(LPDRAWITEMSTRUCT pDIS);
 
 // UI functions
-void SwitchPage(Page newPage);
+void SwitchPage(Page newPage, HWND hWnd);
 void ToggleSidePanel(HWND hWnd);
 void RepositionControls(HWND hWnd);
 void DrawTabButton(LPDRAWITEMSTRUCT pDIS, bool isActive);
@@ -277,15 +277,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 				break;
 
             case IDC_TAB_INVENTORY:
-                SwitchPage(PAGE_INVENTORY);
-				break;
+                SwitchPage(PAGE_INVENTORY, hWnd);
+                break;
 
             case IDC_TAB_MAILBOX:
-				SwitchPage(PAGE_MAILBOX);
-				break;
+                SwitchPage(PAGE_MAILBOX, hWnd);
+                break;
 
-			case IDC_TAB_SCHEDULE:
-				SwitchPage(PAGE_SCHEDULE);
+            case IDC_TAB_SCHEDULE:
+                SwitchPage(PAGE_SCHEDULE, hWnd);
 				break;
 
             case IDC_TOGGLE_PANEL_BTN:
@@ -311,7 +311,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_DRAWITEM:
     {
         LPDRAWITEMSTRUCT pDIS = (LPDRAWITEMSTRUCT)lParam;
-
+		// ctlID is a variable member of the DRAWITEMSTRUCT structure. pDIS is a pointer to a DRAWITEMSTRUCT structure.
+		// thus, pDIS->CtlID gives us the control ID of the button being drawn. It's similar to using object.member in other languages; 
+        // the difference here is that you're working with the pointer to the object, rather than the object itself.
         if (pDIS->CtlID == IDC_CLOCK_TOGGLE_BTN)
         {
             DrawColoredButton(pDIS);
@@ -340,6 +342,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     }
 	break;
 
+    case WM_CTLCOLORBTN:
+    {
+        HDC hdcButton = (HDC)wParam;
+        SetTextColor(hdcButton, RGB(30, 30, 35));
+        SetBkMode(hdcButton, TRANSPARENT); // Make text background transparent
+        return (LRESULT)GetStockObject(NULL_BRUSH); // Prevents solid background fill
+    }
+
     case WM_CTLCOLORSTATIC:
     {
         HDC hdcStatic = (HDC)wParam;
@@ -349,6 +359,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 		static HBRUSH hbrBkgnd = CreateSolidBrush(RGB(30, 30, 35));
 		return (LRESULT)hbrBkgnd;
     }
+    break;
 
     case WM_SIZE:
         RepositionControls(hWnd);
@@ -588,17 +599,21 @@ void DrawColoredButton(LPDRAWITEMSTRUCT pDIS)
 
 // UI Implementation
 
-void SwitchPage(Page newPage)
+void SwitchPage(Page newPage, HWND hWnd)
 {
     currentPage = newPage;
 
     // Force redraw of all tab buttons
     InvalidateRect(hTabInventory, NULL, TRUE);
-	InvalidateRect(hTabMailbox, NULL, TRUE);
+    InvalidateRect(hTabMailbox, NULL, TRUE);
     InvalidateRect(hTabSchedule, NULL, TRUE);
-    
+
     // Update content area
-	UpdateContentArea(GetParent(hTabInventory));
+    UpdateContentArea(GetParent(hContentArea));
+
+    // Update layering of tab buttons
+    RepositionControls(hWnd);
+
 }
 
 void ToggleSidePanel(HWND hWnd)
@@ -616,24 +631,51 @@ void RepositionControls(HWND hWnd)
     int panelOffset = sidePanelOpen ? SIDE_PANEL_WIDTH : 0;
 
     // Reposition toggle button
-    SetWindowPos(hTogglePanelBtn, NULL,
-        panelOffset, 0, TOGGLE_BTN_WIDTH, TAB_BAR_HEIGHT, SWP_NOZORDER);
+    SetWindowPos(hTogglePanelBtn, NULL, panelOffset, 0, TOGGLE_BTN_WIDTH, TAB_BAR_HEIGHT, SWP_NOZORDER);
+
+    // Calculate centered position for tabs
+	int tabWidth = 200;
+    int tabOverlap = 15; // Pixels of overlap between tabs
+	int totalTabWidth = tabWidth * 3;
+    int availableWidth = clientRect.right;// - panelOffset - TOGGLE_BTN_WIDTH;
+    int startX = (availableWidth - totalTabWidth) / 2; //panelOffset + TOGGLE_BTN_WIDTH + (availableWidth - totalTabWidth) / 2;
+
+	// Ensure tabs don't go off-screen if window is too small
+	if (startX < panelOffset + TOGGLE_BTN_WIDTH)
+		startX = panelOffset + TOGGLE_BTN_WIDTH;
 
     // Reposition Tab Buttons
-    int tabWidth = 200;
-    SetWindowPos(hTabInventory, NULL,
-        panelOffset + TOGGLE_BTN_WIDTH, 0, tabWidth, TAB_BAR_HEIGHT, SWP_NOZORDER);
-    SetWindowPos(hTabMailbox, NULL,
-        panelOffset + TOGGLE_BTN_WIDTH + tabWidth, 0, tabWidth, TAB_BAR_HEIGHT, SWP_NOZORDER);
-    SetWindowPos(hTabSchedule, NULL,
-        panelOffset + TOGGLE_BTN_WIDTH + tabWidth * 2, 0, tabWidth, TAB_BAR_HEIGHT, SWP_NOZORDER);
+	// IMPORTANT: draw the active tab FIRST so it appears on top. This makes no sense and cost 3 hours of troubleshooting, but whatever. Fuck me I guess.
+    if (currentPage == PAGE_INVENTORY)
+    {
+        // Position active tab first so it takes top priority
+        SetWindowPos(hTabInventory, HWND_TOP, startX, 0, tabWidth, TAB_BAR_HEIGHT, SWP_SHOWWINDOW);
+        // Position inactive tabs last
+        SetWindowPos(hTabMailbox, NULL, startX + tabWidth - tabOverlap, 0, tabWidth, TAB_BAR_HEIGHT, SWP_NOACTIVATE);
+        SetWindowPos(hTabSchedule, NULL, startX + (tabWidth * 2) - (tabOverlap * 2), 0, tabWidth, TAB_BAR_HEIGHT, SWP_NOACTIVATE);
+    }
+    else if (currentPage == PAGE_MAILBOX)
+    {
+        // Position active tab first so it takes top priority
+        SetWindowPos(hTabMailbox, HWND_TOP, startX + tabWidth - tabOverlap, 0, tabWidth, TAB_BAR_HEIGHT, SWP_SHOWWINDOW);
+        // Position inactive tabs last
+        SetWindowPos(hTabInventory, NULL, startX, 0, tabWidth, TAB_BAR_HEIGHT, SWP_NOACTIVATE);
+        SetWindowPos(hTabSchedule, NULL, startX + (tabWidth * 2) - (tabOverlap * 2), 0, tabWidth, TAB_BAR_HEIGHT, SWP_NOACTIVATE);
+    }
+    else // PAGE_SCHEDULE
+    {
+        // Position active tab first so it takes top priority
+        SetWindowPos(hTabSchedule, HWND_TOP, startX + (tabWidth * 2) - (tabOverlap * 2), 0, tabWidth, TAB_BAR_HEIGHT, SWP_SHOWWINDOW);
+        // Position inactive tabs last
+        SetWindowPos(hTabMailbox, NULL, startX + tabWidth - tabOverlap, 0, tabWidth, TAB_BAR_HEIGHT, SWP_NOACTIVATE);
+        SetWindowPos(hTabInventory, NULL, startX, 0, tabWidth, TAB_BAR_HEIGHT, SWP_NOACTIVATE);
+    }
     
     // Reposition Content Area
 	int contentX = panelOffset + TOGGLE_BTN_WIDTH;
 	int contentWidth = clientRect.right - contentX;
 	int contentHeight = clientRect.bottom - TAB_BAR_HEIGHT;
-    SetWindowPos(hContentArea, NULL,
-		contentX, TAB_BAR_HEIGHT, contentWidth, contentHeight, SWP_NOZORDER);
+    SetWindowPos(hContentArea, NULL, contentX, TAB_BAR_HEIGHT, contentWidth, contentHeight, SWP_NOZORDER);
 
     // Show/hide side panel elements
     if (sidePanelOpen)
@@ -649,7 +691,7 @@ void RepositionControls(HWND hWnd)
 		ShowWindow(hStatusText, SW_HIDE);
     }
 
-    // Force a full window redraw to update teh side panel background
+    // Force a full window redraw to update the side panel background
 	InvalidateRect(hWnd, NULL, TRUE);
 	UpdateWindow(hWnd);
 }
@@ -661,23 +703,103 @@ void DrawTabButton(LPDRAWITEMSTRUCT pDIS, bool isActive)
 
 	Graphics graphics(hdc);
 	graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+	graphics.SetPixelOffsetMode(PixelOffsetModeHighQuality);
 
-	Color bgColor = isActive ? Color(255, 50, 50, 55) : Color(255, 35, 35, 40);
-	Color textColor = isActive ? Color(255, 100, 180, 255) : Color(255, 200, 200, 200);
-
-    Rect gdipRect(rect.left,
-        rect.top,
-        rect.right - rect.left,
-        rect.bottom - rect.top);
-	SolidBrush bgBrush(bgColor);
-	graphics.FillRectangle(&bgBrush, gdipRect);
-
+    // DON'T clear the background - let it be transparent for overlapping!
+    // Only clear if this is the active tab (so it draws on top cleanly)
     if (isActive)
     {
-        Pen accentPen(Color(255, 13, 110, 253), 3.0f);
-        graphics.DrawLine(&accentPen, (INT)rect.left, (INT)rect.bottom - 2, (INT)rect.right, (INT)rect.bottom - 2);
+        Color clearColor(0, 30, 30, 35);
+        SolidBrush clearBrush(clearColor);
+        graphics.FillRectangle(&clearBrush, (INT)rect.left, (INT)rect.top, (INT)(rect.right - rect.left), (INT)(rect.bottom - rect.top));
+    }
+	Color bgColor = isActive ? Color(255, 30, 30, 35) : Color(255, 35, 35, 40);
+	Color textColor = isActive ? Color(255, 100, 180, 255) : Color(255, 200, 200, 200);
+
+	// Create trapezoid shape (wider at bottom, narrower at top)
+	int indent = 8; // How much to indent the top corners
+	int cornerRadius = 6; // Radius for rounded corners
+
+    REAL left = (REAL)rect.left;
+    REAL right = (REAL)rect.right - 1;
+    REAL top = (REAL)rect.top + 5;
+    REAL bottom = (REAL)rect.bottom;
+
+    // Create a graphics path for the trapezoid with rounded corners
+    GraphicsPath path;
+
+    // Start from top-left corner (indented, with rounded corner)
+    RectF topLeftArc(left + indent, top, (REAL)(cornerRadius * 2), (REAL)(cornerRadius * 2));
+    path.AddArc(topLeftArc, 180.0f, 90.0f);
+
+    // Top edge (narrower at top)
+    path.AddLine(left + indent + cornerRadius, top, right - indent - cornerRadius, top);
+
+    // Top-right rounded corner
+    RectF topRightArc(right - indent - cornerRadius * 2, top, (REAL)(cornerRadius * 2), (REAL)(cornerRadius * 2));
+    path.AddArc(topRightArc, 270.0f, 90.0f);
+
+    // Right edge (angled outward toward bottom)
+    path.AddLine(right - indent, top + cornerRadius, right, bottom);
+
+    // Bottom edge (full width at bottom)
+    path.AddLine(right, bottom, left, bottom);
+
+    // Left edge (angled outward toward bottom)
+    path.AddLine(left, bottom, left + indent, top + cornerRadius);
+
+    path.CloseFigure();
+
+    // Fill the trapezoid
+    SolidBrush bgBrush(bgColor);
+    graphics.FillPath(&bgBrush, &path);
+
+    // Draw border - but skip the bottom line if active!
+    Color borderColor = isActive ? Color(255, 60, 90, 95) : Color(255, 50, 50, 55);
+    Pen borderPen(borderColor, 1.5f);
+
+    // Draw line connecting edge of screen to corner of tab
+    graphics.DrawLine(&borderPen, left - indent * 10, bottom, left, bottom);
+    
+    if (isActive)
+    {
+        // Draw only the top and sides for active tab (no bottom border)
+        GraphicsPath borderPath;
+
+        // Top-left arc
+        RectF topLeftBorderArc(left + indent, top, (REAL)(cornerRadius * 2), (REAL)(cornerRadius * 2));
+        borderPath.AddArc(topLeftBorderArc, 180.0f, 90.0f);
+
+        // Top edge
+        borderPath.AddLine(left + indent + cornerRadius, top, right - indent - cornerRadius, top);
+
+        // Top-right arc
+        RectF topRightBorderArc(right - indent - cornerRadius * 2, top, (REAL)(cornerRadius * 2), (REAL)(cornerRadius * 2));
+        borderPath.AddArc(topRightBorderArc, 270.0f, 90.0f);
+
+        // Right edge (down to bottom)
+        borderPath.AddLine(right - indent, top + cornerRadius, right, bottom);
+
+        // Draw the border path (no bottom line!)
+        graphics.DrawPath(&borderPen, &borderPath);
+
+        // Left edge separately
+        graphics.DrawLine(&borderPen, left, bottom, left + indent, top + cornerRadius);
+    }
+    else
+    {
+        // Inactive tabs get full border
+        graphics.DrawPath(&borderPen, &path);
     }
 
+    // Draw accent line at bottom for active tab
+    //if (isActive)
+    //{
+    //    Pen accentPen(Color(255, 13, 110, 253), 3.0f);
+    //    graphics.DrawLine(&accentPen, (INT)left, (INT)bottom - 1, (INT)right, (INT)bottom - 1);
+    //}
+
+    // Draw button text
 	WCHAR buttonText[32];
 	GetWindowTextW(pDIS->hwndItem, buttonText, 32);
 
@@ -710,6 +832,7 @@ void DrawToggleButton(LPDRAWITEMSTRUCT pDIS)
 
     Color bgColor = Color(255, 35, 35, 40);
 
+	// Using GDI+ Rect instead of just casting to avoid potential issues
     Rect gdipRect(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top);
     SolidBrush bgBrush(bgColor);
     graphics.FillRectangle(&bgBrush, gdipRect);
@@ -747,11 +870,13 @@ void UpdateContentArea(HWND hWnd)
         content << L"This is where inventory tracking will go.\n";
         content << L"Track boxes, supplies, and retail items.";
         break;
+
     case PAGE_MAILBOX:
         content << L"MAILBOX MANAGEMENT\n\n";
 		content << L"This is where mailbox management will go.\n";
         content << L"Track customer mailboxes and their details.";
         break;
+
     case PAGE_SCHEDULE:
         content << L"SCHEDULE MANAGEMENT\n\n";
 		content << L"This is where schedule management will go.\n";
