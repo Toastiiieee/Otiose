@@ -21,8 +21,19 @@ using std::min;
 
 #define MAX_LOADSTRING 100
 
-// Button IDs
+// Button and Control IDs
 #define IDC_CLOCK_TOGGLE_BTN 1001
+#define IDC_TAB_INVENTORY 1002
+#define IDC_TAB_MAILBOX 1003
+#define IDC_TAB_SCHEDULE 1004
+#define IDC_TOGGLE_PANEL_BTN 1005
+
+// Page enumeration
+enum Page {
+    PAGE_INVENTORY,
+    PAGE_MAILBOX,
+    PAGE_SCHEDULE
+};
 
 // Shift structure
 struct Shift {
@@ -31,7 +42,7 @@ struct Shift {
     time_t clockInTime;
     time_t clockOutTime;
     double hoursWorked;
-    bool isActive = false; // true if clocked in, false if clocked out
+    bool isActive;
 };
 
 // Global Variables:
@@ -39,22 +50,36 @@ HINSTANCE hInst;                                // current instance
 WCHAR szTitle[MAX_LOADSTRING];                  // The title bar text
 WCHAR szWindowClass[MAX_LOADSTRING];            // the main window class name
 
+// UI Elements
+HWND hClockToggleBtn, hStatusText;
+HWND hTabInventory, hTabMailbox, hTabSchedule;
+HWND hTogglePanelBtn;
+HWND hContentArea;
+
 // Clock In/Out System Variables
 Shift currentShift;
-HWND hClockToggleBtn, hStatusText;
 ULONG_PTR gdiplusToken; // For GDI+ initialization
 HFONT hStatusFont; // Font for status text
+
+// UI State
+Page currentPage = PAGE_INVENTORY;
+bool sidePanelOpen = true;
+const int SIDE_PANEL_WIDTH = 250;
+const int TAB_BAR_HEIGHT = 50;
+const int TOGGLE_BTN_WIDTH = 30;
+
+// Placeholder Employee Info
 const std::string EMPLOYEE_NAME = "Alexa Culley"; // Placeholder, using me for now to track internship hours
 const std::string EMPLOYEE_ID = "EMP001";         // Placeholder ID
 const std::string TIMESHEET_FILE = "timesheet.csv";
 
-// Forward declarations of functions included in this code module:
+// Forward declarations
 ATOM                MyRegisterClass(HINSTANCE hInstance);
 BOOL                InitInstance(HINSTANCE, int);
 LRESULT CALLBACK    WndProc(HWND, UINT, WPARAM, LPARAM);
 INT_PTR CALLBACK    About(HWND, UINT, WPARAM, LPARAM);
 
-// function prototypes 
+// Clock In/Out functions 
 void ClockIn();
 void ClockOut();
 void UpdateStatusDisplay(HWND hWnd);
@@ -62,6 +87,14 @@ void SaveShiftToCSV(const Shift& shift);
 std::string TimeToString(time_t t);
 void InitializeCSV();
 void DrawColoredButton(LPDRAWITEMSTRUCT pDIS);
+
+// UI functions
+void SwitchPage(Page newPage);
+void ToggleSidePanel(HWND hWnd);
+void RepositionControls(HWND hWnd);
+void DrawTabButton(LPDRAWITEMSTRUCT pDIS, bool isActive);
+void DrawToggleButton(LPDRAWITEMSTRUCT pDIS);
+void UpdateContentArea(HWND hWnd);
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                      _In_opt_ HINSTANCE hPrevInstance,
@@ -130,10 +163,7 @@ ATOM MyRegisterClass(HINSTANCE hInstance)
     wcex.hInstance      = hInstance;
     wcex.hIcon          = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_OTIOSE));
     wcex.hCursor        = LoadCursor(nullptr, IDC_ARROW);
-
-	// Create a dark background brush to give the app an overall dark theme
 	wcex.hbrBackground = CreateSolidBrush(RGB(30, 30, 35)); // Dark grey/blue background
-    
     wcex.lpszMenuName   = nullptr;
     wcex.lpszClassName  = szWindowClass;
     wcex.hIconSm        = LoadIcon(wcex.hInstance, MAKEINTRESOURCE(IDI_SMALL));
@@ -153,26 +183,63 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
       return FALSE;
    }
 
-   // Create Clock Toggle button
+   // Create Tab Buttons
+   hTabInventory = CreateWindowW(
+       L"BUTTON", L"Inventory",
+       WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
+       SIDE_PANEL_WIDTH + TOGGLE_BTN_WIDTH, 0, 200, TAB_BAR_HEIGHT,
+	   hWnd, (HMENU)IDC_TAB_INVENTORY, hInstance, nullptr);
+
+   hTabMailbox = CreateWindowW(
+       L"BUTTON", L"Mailbox",
+       WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
+	   SIDE_PANEL_WIDTH + TOGGLE_BTN_WIDTH + 200, 0, 200, TAB_BAR_HEIGHT,
+	   hWnd, (HMENU)IDC_TAB_MAILBOX, hInstance, nullptr);
+
+   hTabSchedule = CreateWindowW(
+       L"BUTTON", L"Schedule",
+       WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
+       SIDE_PANEL_WIDTH + TOGGLE_BTN_WIDTH + 400, 0, 200, TAB_BAR_HEIGHT,
+	   hWnd, (HMENU)IDC_TAB_SCHEDULE, hInstance, nullptr);
+
+   // Create Toggle Side Panel Button
+   hTogglePanelBtn = CreateWindowW(
+       L"BUTTON", L"\u2630",
+       WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
+       SIDE_PANEL_WIDTH, 0, TOGGLE_BTN_WIDTH, TAB_BAR_HEIGHT,
+       hWnd, (HMENU)IDC_TOGGLE_PANEL_BTN, hInstance, nullptr);
+
+   // Create Clock Toggle button in side panel
    hClockToggleBtn = CreateWindowW(
        L"BUTTON", L"Clock In",
        WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
-       125, 50, 150, 120, // make it square so the circle fits properly
+       65, 80, 120, 120,
        hWnd, (HMENU)IDC_CLOCK_TOGGLE_BTN, hInstance, nullptr);
 
-   // Create Status text display
+   // Create Status text display in side panel
    hStatusText = CreateWindowW(
        L"STATIC", L"Status: Currently Clocked Out", 
        WS_VISIBLE | WS_CHILD | SS_LEFT,
-       50, 190, 300, 200, 
+       10, 220, 230, 250,
 	   hWnd, nullptr, hInstance, nullptr);
 
    // Create a font for the status text
    hStatusFont = CreateFontW(
-       18, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+       14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI"
    );
+   SendMessage(hStatusText, WM_SETFONT, (WPARAM)hStatusFont, TRUE);
+
+   // Create main content area
+   hContentArea = CreateWindowW(
+       L"STATIC", L"",
+       WS_VISIBLE | WS_CHILD | SS_LEFT,
+       SIDE_PANEL_WIDTH + TOGGLE_BTN_WIDTH, TAB_BAR_HEIGHT,
+       1750 - (SIDE_PANEL_WIDTH + TOGGLE_BTN_WIDTH), 1000 - TAB_BAR_HEIGHT,
+	   hWnd, nullptr, hInstance, nullptr);
+
+   UpdateContentArea(hWnd);
 
    ShowWindow(hWnd, nCmdShow);
    UpdateWindow(hWnd);
@@ -209,6 +276,22 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 }
 				break;
 
+            case IDC_TAB_INVENTORY:
+                SwitchPage(PAGE_INVENTORY);
+				break;
+
+            case IDC_TAB_MAILBOX:
+				SwitchPage(PAGE_MAILBOX);
+				break;
+
+			case IDC_TAB_SCHEDULE:
+				SwitchPage(PAGE_SCHEDULE);
+				break;
+
+            case IDC_TOGGLE_PANEL_BTN:
+				ToggleSidePanel(hWnd);
+				break;
+
             case IDM_ABOUT:
 				// Removed About - keeping in case of future use
                 // DialogBox(hInst, MAKEINTRESOURCE(IDD_ABOUTBOX), hWnd, About);
@@ -227,34 +310,64 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
     case WM_DRAWITEM:
     {
-        // Handle drawing the colored button
         LPDRAWITEMSTRUCT pDIS = (LPDRAWITEMSTRUCT)lParam;
+
         if (pDIS->CtlID == IDC_CLOCK_TOGGLE_BTN)
         {
             DrawColoredButton(pDIS);
             return TRUE;
         }
+        else if (pDIS->CtlID == IDC_TAB_INVENTORY)
+        {
+            DrawTabButton(pDIS, currentPage == PAGE_INVENTORY);
+            return TRUE;
+        }
+        else if (pDIS->CtlID == IDC_TAB_MAILBOX)
+        {
+            DrawTabButton(pDIS, currentPage == PAGE_MAILBOX);
+            return TRUE;
+        }
+        else if (pDIS->CtlID == IDC_TAB_SCHEDULE)
+        {
+            DrawTabButton(pDIS, currentPage == PAGE_SCHEDULE);
+            return TRUE;
+        }
+        else if (pDIS->CtlID == IDC_TOGGLE_PANEL_BTN)
+        {
+            DrawToggleButton(pDIS);
+            return TRUE;
+		}
     }
 	break;
 
     case WM_CTLCOLORSTATIC:
     {
-		// Make the status text white for better visibility on the dark background
         HDC hdcStatic = (HDC)wParam;
         SetTextColor(hdcStatic, RGB(255, 255, 255)); // White text
         SetBkColor(hdcStatic, RGB(30, 30, 35)); // Match window background
-
-        if (!GetStockObject(NULL_BRUSH))
-            return (LRESULT)GetStockObject(NULL_BRUSH);
         
 		static HBRUSH hbrBkgnd = CreateSolidBrush(RGB(30, 30, 35));
 		return (LRESULT)hbrBkgnd;
     }
 
+    case WM_SIZE:
+        RepositionControls(hWnd);
+		break;
+
     case WM_PAINT:
         {
             PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hWnd, &ps);
+
+			// Draw side panel background
+            if (sidePanelOpen)
+            {
+                RECT panelRect = { 0, 0, SIDE_PANEL_WIDTH, 10000 };
+                HBRUSH panelBrush = CreateSolidBrush(RGB(40, 40, 45)); 
+                FillRect(hdc, &panelRect, panelBrush);
+                DeleteObject(panelBrush);
+			}
+
             EndPaint(hWnd, &ps);
         }
         break;
@@ -317,24 +430,22 @@ void UpdateStatusDisplay(HWND hWnd)
 
     if (currentShift.isActive)
     {
-        status << L"Status: Currently Clocked In\n\n";
-        status << L"Employee: " << EMPLOYEE_NAME.c_str() << L"\n";
+        status << L"Status: Clocked In\n\n";
+        status << L"Employee:\n" << EMPLOYEE_NAME.c_str() << L"\n\n";
         status << L"Clocked In at: " << TimeToString(currentShift.clockInTime).c_str() << L"\n";
     }
     else if (currentShift.clockOutTime > 0)
     {
-		status << L"Status: Currently Clocked Out\n\n";
-        status << L"Employee: " << EMPLOYEE_NAME.c_str() << L"\n";
-		status << L"Clock In Time: " << TimeToString(currentShift.clockInTime).c_str() << L"\n";
-        status << L"Clock Out Time: " << TimeToString(currentShift.clockOutTime).c_str() << L"\n";
-		status << L"Hours Worked: " << std::fixed << std::setprecision(2) 
+		status << L"Status: Clocked Out\n\n";
+        status << L"Employee:\n" << EMPLOYEE_NAME.c_str() << L"\n\n";
+        status << L"Last Shift:\n" << std::fixed << std::setprecision(2)
             << currentShift.hoursWorked << L" hours\n";
     }
     else
     {
-		status << L"Status: Currently Clocked Out\n\n";
-		status << L"Employee: " << EMPLOYEE_NAME.c_str() << L"\n";
-		status << L"Ready to Clock In!\n";
+		status << L"Status: Clocked Out\n\n";
+		status << L"Employee:\n" << EMPLOYEE_NAME.c_str() << L"\n\n";
+		status << L"Ready to clock in!";
     }
 
     SetWindowTextW(hStatusText, status.str().c_str());
@@ -388,8 +499,9 @@ void DrawColoredButton(LPDRAWITEMSTRUCT pDIS)
     RECT rect = pDIS->rcItem;
 
 	// Clear the background first to prevent any artifacts
-    HBRUSH hBackBrush = CreateSolidBrush(RGB(30, 30, 35));
+    HBRUSH hBackBrush = CreateSolidBrush(RGB(40, 40, 45));
 	FillRect(hdc, &rect, hBackBrush);
+    DeleteObject(hBackBrush);
 
 	// Create GDI+ Graphics object for smoother rendering
 	Graphics graphics(hdc);
@@ -471,6 +583,181 @@ void DrawColoredButton(LPDRAWITEMSTRUCT pDIS)
 
     // enable text anti-aliasing
 	graphics.SetTextRenderingHint(TextRenderingHintAntiAlias);
-
     graphics.DrawString(buttonText, -1, &font, layoutRect, &stringFormat, &textBrush);
+}
+
+// UI Implementation
+
+void SwitchPage(Page newPage)
+{
+    currentPage = newPage;
+
+    // Force redraw of all tab buttons
+    InvalidateRect(hTabInventory, NULL, TRUE);
+	InvalidateRect(hTabMailbox, NULL, TRUE);
+    InvalidateRect(hTabSchedule, NULL, TRUE);
+    
+    // Update content area
+	UpdateContentArea(GetParent(hTabInventory));
+}
+
+void ToggleSidePanel(HWND hWnd)
+{
+    sidePanelOpen = !sidePanelOpen;
+    RepositionControls(hWnd);
+    InvalidateRect(hWnd, NULL, TRUE); // Redraw window to update side panel
+}
+
+void RepositionControls(HWND hWnd)
+{
+    RECT clientRect;
+    GetClientRect(hWnd, &clientRect);
+
+    int panelOffset = sidePanelOpen ? SIDE_PANEL_WIDTH : 0;
+
+    // Reposition toggle button
+    SetWindowPos(hTogglePanelBtn, NULL,
+        panelOffset, 0, TOGGLE_BTN_WIDTH, TAB_BAR_HEIGHT, SWP_NOZORDER);
+
+    // Reposition Tab Buttons
+    int tabWidth = 200;
+    SetWindowPos(hTabInventory, NULL,
+        panelOffset + TOGGLE_BTN_WIDTH, 0, tabWidth, TAB_BAR_HEIGHT, SWP_NOZORDER);
+    SetWindowPos(hTabMailbox, NULL,
+        panelOffset + TOGGLE_BTN_WIDTH + tabWidth, 0, tabWidth, TAB_BAR_HEIGHT, SWP_NOZORDER);
+    SetWindowPos(hTabSchedule, NULL,
+        panelOffset + TOGGLE_BTN_WIDTH + tabWidth * 2, 0, tabWidth, TAB_BAR_HEIGHT, SWP_NOZORDER);
+    
+    // Reposition Content Area
+	int contentX = panelOffset + TOGGLE_BTN_WIDTH;
+	int contentWidth = clientRect.right - contentX;
+	int contentHeight = clientRect.bottom - TAB_BAR_HEIGHT;
+    SetWindowPos(hContentArea, NULL,
+		contentX, TAB_BAR_HEIGHT, contentWidth, contentHeight, SWP_NOZORDER);
+
+    // Show/hide side panel elements
+    if (sidePanelOpen)
+    {
+        // Position elements within the side panel
+        SetWindowPos(hClockToggleBtn, NULL, 65, 80, 120, 120, SWP_NOZORDER | SWP_SHOWWINDOW);
+		SetWindowPos(hStatusText, NULL, 10, 220, 230, 250, SWP_NOZORDER | SWP_SHOWWINDOW);
+    }
+    else
+    {
+        // Move them off-screen when hidden
+		ShowWindow(hClockToggleBtn, SW_HIDE);
+		ShowWindow(hStatusText, SW_HIDE);
+    }
+
+    // Force a full window redraw to update teh side panel background
+	InvalidateRect(hWnd, NULL, TRUE);
+	UpdateWindow(hWnd);
+}
+
+void DrawTabButton(LPDRAWITEMSTRUCT pDIS, bool isActive)
+{
+    HDC hdc = pDIS->hDC;
+    RECT rect = pDIS->rcItem;
+
+	Graphics graphics(hdc);
+	graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+
+	Color bgColor = isActive ? Color(255, 50, 50, 55) : Color(255, 35, 35, 40);
+	Color textColor = isActive ? Color(255, 100, 180, 255) : Color(255, 200, 200, 200);
+
+    Rect gdipRect(rect.left,
+        rect.top,
+        rect.right - rect.left,
+        rect.bottom - rect.top);
+	SolidBrush bgBrush(bgColor);
+	graphics.FillRectangle(&bgBrush, gdipRect);
+
+    if (isActive)
+    {
+        Pen accentPen(Color(255, 13, 110, 253), 3.0f);
+        graphics.DrawLine(&accentPen, (INT)rect.left, (INT)rect.bottom - 2, (INT)rect.right, (INT)rect.bottom - 2);
+    }
+
+	WCHAR buttonText[32];
+	GetWindowTextW(pDIS->hwndItem, buttonText, 32);
+
+	FontFamily fontFamily(L"Segoe UI");
+	Font font(&fontFamily, 14, isActive ? FontStyleBold : FontStyleRegular, UnitPixel);
+    SolidBrush textBrush(textColor);
+
+	StringFormat stringFormat;
+	stringFormat.SetAlignment(StringAlignmentCenter);
+    stringFormat.SetLineAlignment(StringAlignmentCenter);
+    
+    RectF layoutRect(
+        (REAL)rect.left,
+        (REAL)rect.top,
+        (REAL)(rect.right - rect.left),
+        (REAL)(rect.bottom - rect.top)
+	);
+
+	graphics.SetTextRenderingHint(TextRenderingHintAntiAlias);
+	graphics.DrawString(buttonText, -1, &font, layoutRect, &stringFormat, &textBrush);
+}
+
+void DrawToggleButton(LPDRAWITEMSTRUCT pDIS)
+{
+    HDC hdc = pDIS->hDC;
+    RECT rect = pDIS->rcItem;
+
+    Graphics graphics(hdc);
+    graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+
+    Color bgColor = Color(255, 35, 35, 40);
+
+    Rect gdipRect(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top);
+    SolidBrush bgBrush(bgColor);
+    graphics.FillRectangle(&bgBrush, gdipRect);
+
+    WCHAR buttonText[32];
+	GetWindowTextW(pDIS->hwndItem, buttonText, 32);
+
+    FontFamily fontFamily(L"Segoe UI");
+    Font font(&fontFamily, 20, FontStyleBold, UnitPixel);
+    SolidBrush textBrush(Color(255, 200, 200, 200));
+
+    StringFormat stringFormat;
+    stringFormat.SetAlignment(StringAlignmentCenter);
+    stringFormat.SetLineAlignment(StringAlignmentCenter);
+
+    RectF layoutRect(
+        (REAL)rect.left,
+        (REAL)rect.top,
+        (REAL)(rect.right - rect.left),
+        (REAL)(rect.bottom - rect.top)
+    );
+
+    graphics.SetTextRenderingHint(TextRenderingHintAntiAlias);
+    graphics.DrawString(buttonText, -1, &font, layoutRect, &stringFormat, &textBrush);
+}
+
+void UpdateContentArea(HWND hWnd)
+{
+    std::wstringstream content;
+
+    switch (currentPage)
+    {
+    case PAGE_INVENTORY:
+        content << L"INVENTORY MANAGEMENT\n\n";
+        content << L"This is where inventory tracking will go.\n";
+        content << L"Track boxes, supplies, and retail items.";
+        break;
+    case PAGE_MAILBOX:
+        content << L"MAILBOX MANAGEMENT\n\n";
+		content << L"This is where mailbox management will go.\n";
+        content << L"Track customer mailboxes and their details.";
+        break;
+    case PAGE_SCHEDULE:
+        content << L"SCHEDULE MANAGEMENT\n\n";
+		content << L"This is where schedule management will go.\n";
+		content << L"Create and manage employee schedules.";
+        break;
+    }
+
+    SetWindowTextW(hContentArea, content.str().c_str());
 }
