@@ -370,14 +370,79 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hWnd, &ps);
 
-			// Draw side panel background
+            RECT clientRect;
+            GetClientRect(hWnd, &clientRect);
+
+            // Draw lighter background behind the tab bar
+            RECT tabBarBg = { 0, 0, clientRect.right, TAB_BAR_HEIGHT };
+            HBRUSH tabBarBrush = CreateSolidBrush(RGB(45, 52, 60)); // Lighter than main window
+            FillRect(hdc, &tabBarBg, tabBarBrush);
+            DeleteObject(tabBarBrush);
+
+            // Draw border between tab bar and content area, with gap for active tab
+            int panelOffset = sidePanelOpen ? SIDE_PANEL_WIDTH : 0;
+            int tabWidth = 200;
+            int tabOverlap = 15;
+            int totalTabWidth = tabWidth * 3;
+            int availableWidth = clientRect.right;
+            int startX = (availableWidth - totalTabWidth) / 2;
+
+            if (startX < panelOffset + TOGGLE_BTN_WIDTH)
+                startX = panelOffset + TOGGLE_BTN_WIDTH;
+
+            // Calculate active tab position based on current page
+            int activeTabLeft = 0;
+            int activeTabRight = 0;
+
+            if (currentPage == PAGE_INVENTORY)
+            {
+                activeTabLeft = startX;
+                activeTabRight = startX + tabWidth;
+            }
+            else if (currentPage == PAGE_MAILBOX)
+            {
+                activeTabLeft = startX + tabWidth - tabOverlap;
+                activeTabRight = startX + (tabWidth * 2) - tabOverlap;
+            }
+            else // PAGE_SCHEDULE
+            {
+                activeTabLeft = startX + (tabWidth * 2) - (tabOverlap * 2);
+                activeTabRight = startX + (tabWidth * 3) - (tabOverlap * 2);
+            }
+
+            // Create GDI+ graphics for smooth line drawing
+            Graphics graphics(hdc);
+            graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+
+            Pen borderPen(Color(255, 60, 90, 95), 1.5f);
+
+            // Draw border line from left edge to active tab (should go under inactive tabs)
+            if (activeTabLeft > 0)
+            {
+                graphics.DrawLine(&borderPen, 0, TAB_BAR_HEIGHT - 1, activeTabLeft, TAB_BAR_HEIGHT - 1);
+            }
+
+            // Draw border line from active tab to right edge (should go under inactive tabs)
+            if (activeTabRight < clientRect.right)
+            {
+                graphics.DrawLine(&borderPen, activeTabRight, TAB_BAR_HEIGHT - 1, clientRect.right, TAB_BAR_HEIGHT - 1);
+            }
+
+            // Draw side panel background
             if (sidePanelOpen)
             {
                 RECT panelRect = { 0, 0, SIDE_PANEL_WIDTH, 10000 };
-                HBRUSH panelBrush = CreateSolidBrush(RGB(40, 40, 45)); 
+                HBRUSH panelBrush = CreateSolidBrush(RGB(40, 40, 45));
                 FillRect(hdc, &panelRect, panelBrush);
                 DeleteObject(panelBrush);
-			}
+                // Draw line separating the side panel + toggle bar column from the main content window
+                graphics.DrawLine(&borderPen, (REAL)(SIDE_PANEL_WIDTH + TOGGLE_BTN_WIDTH - 1), 0.0, (REAL)(SIDE_PANEL_WIDTH + TOGGLE_BTN_WIDTH - 1), (REAL)(clientRect.bottom));
+            }
+            else
+            {
+                // Draw line separating the side panel + toggle bar column from the main content window
+                graphics.DrawLine(&borderPen, (REAL)(TOGGLE_BTN_WIDTH - 1), 0.0, (REAL)(TOGGLE_BTN_WIDTH - 1), (REAL)(clientRect.bottom));
+            }
 
             EndPaint(hWnd, &ps);
         }
@@ -757,9 +822,6 @@ void DrawTabButton(LPDRAWITEMSTRUCT pDIS, bool isActive)
     // Draw border - but skip the bottom line if active!
     Color borderColor = isActive ? Color(255, 60, 90, 95) : Color(255, 50, 50, 55);
     Pen borderPen(borderColor, 1.5f);
-
-    // Draw line connecting edge of screen to corner of tab
-    graphics.DrawLine(&borderPen, left - indent * 10, bottom, left, bottom);
     
     if (isActive)
     {
@@ -790,6 +852,10 @@ void DrawTabButton(LPDRAWITEMSTRUCT pDIS, bool isActive)
     {
         // Inactive tabs get full border
         graphics.DrawPath(&borderPen, &path);
+
+        // Also draw the horizontal border line underneath inactive tabs
+        Pen horizontalBorderPen(Color(255, 60, 90, 95), 2.0f);
+        graphics.DrawLine(&horizontalBorderPen, left, bottom, right, bottom);
     }
 
     // Draw accent line at bottom for active tab
