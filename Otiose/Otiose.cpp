@@ -27,6 +27,8 @@ using std::min;
 #define IDC_TAB_MAILBOX 1003
 #define IDC_TAB_SCHEDULE 1004
 #define IDC_TOGGLE_PANEL_BTN 1005
+#define IDC_ADD_CATEGORY_BTN 1006
+#define IDC_CATEGORY_LIST 1007
 
 // Page enumeration
 enum Page {
@@ -55,6 +57,7 @@ HWND hClockToggleBtn, hStatusText;
 HWND hTabInventory, hTabMailbox, hTabSchedule;
 HWND hTogglePanelBtn;
 HWND hContentArea;
+HWND hCategoryPanel, hCategoryList, hAddCategoryBtn;
 
 // Clock In/Out System Variables
 Shift currentShift;
@@ -67,6 +70,7 @@ bool sidePanelOpen = true;
 const int SIDE_PANEL_WIDTH = 250;
 const int TAB_BAR_HEIGHT = 50;
 const int TOGGLE_BTN_WIDTH = 30;
+const int CATEGORY_PANEL_WIDTH = 200;
 
 // Placeholder Employee Info
 const std::string EMPLOYEE_NAME = "Toastiiieee"; // Placeholder, using me for now to track internship hours
@@ -94,7 +98,9 @@ void ToggleSidePanel(HWND hWnd);
 void RepositionControls(HWND hWnd);
 void DrawTabButton(LPDRAWITEMSTRUCT pDIS, bool isActive);
 void DrawToggleButton(LPDRAWITEMSTRUCT pDIS);
+void DrawAddCategoryButton(LPDRAWITEMSTRUCT pDIS);
 void UpdateContentArea(HWND hWnd);
+void UpdateCategoryPanel(HWND hWnd);
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                      _In_opt_ HINSTANCE hPrevInstance,
@@ -236,10 +242,34 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
        L"STATIC", L"",
        WS_VISIBLE | WS_CHILD | SS_LEFT,
        SIDE_PANEL_WIDTH + TOGGLE_BTN_WIDTH, TAB_BAR_HEIGHT,
-       1750 - (SIDE_PANEL_WIDTH + TOGGLE_BTN_WIDTH), 1000 - TAB_BAR_HEIGHT,
-	   hWnd, nullptr, hInstance, nullptr);
+       1750 - (SIDE_PANEL_WIDTH + TOGGLE_BTN_WIDTH + CATEGORY_PANEL_WIDTH), 1000 - TAB_BAR_HEIGHT,
+       hWnd, nullptr, hInstance, nullptr);
+
+   // Create category panel (right side, starts below tabs)
+   // Use a child window to contain category controls
+   hCategoryPanel = CreateWindowW(
+       L"STATIC", L"",
+       WS_VISIBLE | WS_CHILD | SS_OWNERDRAW,
+       1750 - CATEGORY_PANEL_WIDTH, TAB_BAR_HEIGHT,
+       CATEGORY_PANEL_WIDTH, 1000 - TAB_BAR_HEIGHT,
+       hWnd, nullptr, hInstance, nullptr);
+
+   // Create category list (placeholder for now)
+   hCategoryList = CreateWindowW(
+       L"STATIC", L"Categories:\n\nRetail\nSupplies\nBoxes",
+       WS_VISIBLE | WS_CHILD | SS_LEFT,
+       10, 10, CATEGORY_PANEL_WIDTH - 20, 600,
+       hWnd, nullptr, hInstance, nullptr);
+
+   // Create Add Category button
+   hAddCategoryBtn = CreateWindowW(
+       L"BUTTON", L"+",
+       WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
+       1750 - CATEGORY_PANEL_WIDTH + 50, TAB_BAR_HEIGHT + 650, 100, 50,
+       hWnd, (HMENU)IDC_ADD_CATEGORY_BTN, hInstance, nullptr);
 
    UpdateContentArea(hWnd);
+   UpdateCategoryPanel(hWnd);
 
    ShowWindow(hWnd, nCmdShow);
    UpdateWindow(hWnd);
@@ -292,6 +322,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 				ToggleSidePanel(hWnd);
 				break;
 
+            case IDC_ADD_CATEGORY_BTN:
+                MessageBoxW(hWnd, L"Add Category button clicked!\n Category creation WIP", L"Add Category", MB_OK);
+                break;
+
             case IDM_ABOUT:
 				// Removed About - keeping in case of future use
                 // DialogBox(hInst, MAKEINTRESOURCE(IDD_ABOUTBOX), hWnd, About);
@@ -339,6 +373,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             DrawToggleButton(pDIS);
             return TRUE;
 		}
+        else if (pDIS->CtlID == IDC_ADD_CATEGORY_BTN)
+        {
+            DrawAddCategoryButton(pDIS);
+            return TRUE;
+        }
     }
 	break;
 
@@ -353,6 +392,18 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_CTLCOLORSTATIC:
     {
         HDC hdcStatic = (HDC)wParam;
+        HWND hwndStatic = (HWND)lParam;
+
+        // Check if this is the category list
+        if (hwndStatic == hCategoryList)
+        {
+            SetTextColor(hdcStatic, RGB(200, 200, 200)); // Light gray text
+            SetBkColor(hdcStatic, RGB(35, 35, 40)); // Dark background
+            static HBRUSH hbrCategory = CreateSolidBrush(RGB(35, 35, 40));
+            return (LRESULT)hbrCategory;
+        }
+
+        // Default styling for other static controls
         SetTextColor(hdcStatic, RGB(255, 255, 255)); // White text
         SetBkColor(hdcStatic, RGB(30, 30, 35)); // Match window background
         
@@ -378,6 +429,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             HBRUSH tabBarBrush = CreateSolidBrush(RGB(45, 52, 60)); // Lighter than main window
             FillRect(hdc, &tabBarBg, tabBarBrush);
             DeleteObject(tabBarBrush);
+
+            // Draw side panel background FIRST
+            if (sidePanelOpen)
+            {
+                RECT panelRect = { 0, 0, SIDE_PANEL_WIDTH, 10000 };
+                HBRUSH panelBrush = CreateSolidBrush(RGB(40, 40, 45));
+                FillRect(hdc, &panelRect, panelBrush);
+                DeleteObject(panelBrush);
+            }
 
             // Draw border between tab bar and content area, with gap for active tab
             int panelOffset = sidePanelOpen ? SIDE_PANEL_WIDTH : 0;
@@ -414,7 +474,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             Graphics graphics(hdc);
             graphics.SetSmoothingMode(SmoothingModeAntiAlias);
 
-            Pen borderPen(Color(255, 60, 90, 95), 1.5f);
+            Pen borderPen(Color(255, 60, 60, 65), 2.0f);
 
             // Draw border line from left edge to active tab (should go under inactive tabs)
             if (activeTabLeft > 0)
@@ -426,22 +486,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             if (activeTabRight < clientRect.right)
             {
                 graphics.DrawLine(&borderPen, activeTabRight, TAB_BAR_HEIGHT - 1, clientRect.right, TAB_BAR_HEIGHT - 1);
-            }
-
-            // Draw side panel background
-            if (sidePanelOpen)
-            {
-                RECT panelRect = { 0, 0, SIDE_PANEL_WIDTH, 10000 };
-                HBRUSH panelBrush = CreateSolidBrush(RGB(40, 40, 45));
-                FillRect(hdc, &panelRect, panelBrush);
-                DeleteObject(panelBrush);
-                // Draw line separating the side panel + toggle bar column from the main content window
-                graphics.DrawLine(&borderPen, (REAL)(SIDE_PANEL_WIDTH + TOGGLE_BTN_WIDTH - 1), 0.0, (REAL)(SIDE_PANEL_WIDTH + TOGGLE_BTN_WIDTH - 1), (REAL)(clientRect.bottom));
-            }
-            else
-            {
-                // Draw line separating the side panel + toggle bar column from the main content window
-                graphics.DrawLine(&borderPen, (REAL)(TOGGLE_BTN_WIDTH - 1), 0.0, (REAL)(TOGGLE_BTN_WIDTH - 1), (REAL)(clientRect.bottom));
             }
 
             EndPaint(hWnd, &ps);
@@ -676,6 +720,9 @@ void SwitchPage(Page newPage, HWND hWnd)
     // Update content area
     UpdateContentArea(GetParent(hContentArea));
 
+    // Update category panel visibility
+    UpdateCategoryPanel(GetParent(hCategoryPanel));
+
     // Update layering of tab buttons
     RepositionControls(hWnd);
 
@@ -699,18 +746,18 @@ void RepositionControls(HWND hWnd)
     SetWindowPos(hTogglePanelBtn, NULL, panelOffset, 0, TOGGLE_BTN_WIDTH, TAB_BAR_HEIGHT, SWP_NOZORDER);
 
     // Calculate centered position for tabs
-	int tabWidth = 200;
+    int tabWidth = 200;
     int tabOverlap = 15; // Pixels of overlap between tabs
-	int totalTabWidth = tabWidth * 3;
+    int totalTabWidth = tabWidth * 3;
     int availableWidth = clientRect.right;// - panelOffset - TOGGLE_BTN_WIDTH;
     int startX = (availableWidth - totalTabWidth) / 2; //panelOffset + TOGGLE_BTN_WIDTH + (availableWidth - totalTabWidth) / 2;
 
-	// Ensure tabs don't go off-screen if window is too small
-	if (startX < panelOffset + TOGGLE_BTN_WIDTH)
-		startX = panelOffset + TOGGLE_BTN_WIDTH;
+    // Ensure tabs don't go off-screen if window is too small
+    if (startX < panelOffset + TOGGLE_BTN_WIDTH)
+        startX = panelOffset + TOGGLE_BTN_WIDTH;
 
     // Reposition Tab Buttons
-	// IMPORTANT: draw the active tab FIRST so it appears on top. This makes no sense and cost 3 hours of troubleshooting, but whatever. Fuck me I guess.
+    // IMPORTANT: draw the active tab FIRST so it appears on top. This makes no sense and cost 3 hours of troubleshooting, but whatever. Fuck me I guess.
     if (currentPage == PAGE_INVENTORY)
     {
         // Position active tab first so it takes top priority
@@ -735,30 +782,43 @@ void RepositionControls(HWND hWnd)
         SetWindowPos(hTabMailbox, NULL, startX + tabWidth - tabOverlap, 0, tabWidth, TAB_BAR_HEIGHT, SWP_NOACTIVATE);
         SetWindowPos(hTabInventory, NULL, startX, 0, tabWidth, TAB_BAR_HEIGHT, SWP_NOACTIVATE);
     }
-    
+
     // Reposition Content Area
-	int contentX = panelOffset + TOGGLE_BTN_WIDTH;
-	int contentWidth = clientRect.right - contentX;
-	int contentHeight = clientRect.bottom - TAB_BAR_HEIGHT;
+    int contentX = panelOffset + TOGGLE_BTN_WIDTH;
+    int contentWidth = clientRect.right - contentX - CATEGORY_PANEL_WIDTH;
+    int contentHeight = clientRect.bottom - TAB_BAR_HEIGHT;
     SetWindowPos(hContentArea, NULL, contentX, TAB_BAR_HEIGHT, contentWidth, contentHeight, SWP_NOZORDER);
+
+    // Reposition Category Panel (right side) and its children
+    int categoryX = clientRect.right - CATEGORY_PANEL_WIDTH;
+    SetWindowPos(hCategoryPanel, NULL, categoryX, TAB_BAR_HEIGHT,
+        CATEGORY_PANEL_WIDTH, contentHeight, SWP_NOZORDER);
+
+    // Reposition category list
+    SetWindowPos(hCategoryList, NULL, categoryX + 10, TAB_BAR_HEIGHT + 10,
+        CATEGORY_PANEL_WIDTH - 20, 600, SWP_NOZORDER);
+
+    // Reposition add category button
+    SetWindowPos(hAddCategoryBtn, NULL, categoryX + 50, TAB_BAR_HEIGHT + 650,
+        100, 50, SWP_NOZORDER);
 
     // Show/hide side panel elements
     if (sidePanelOpen)
     {
         // Position elements within the side panel
         SetWindowPos(hClockToggleBtn, NULL, 65, 80, 120, 120, SWP_NOZORDER | SWP_SHOWWINDOW);
-		SetWindowPos(hStatusText, NULL, 10, 220, 230, 250, SWP_NOZORDER | SWP_SHOWWINDOW);
+        SetWindowPos(hStatusText, NULL, 10, 220, 230, 250, SWP_NOZORDER | SWP_SHOWWINDOW);
     }
     else
     {
         // Move them off-screen when hidden
-		ShowWindow(hClockToggleBtn, SW_HIDE);
-		ShowWindow(hStatusText, SW_HIDE);
+        ShowWindow(hClockToggleBtn, SW_HIDE);
+        ShowWindow(hStatusText, SW_HIDE);
     }
 
     // Force a full window redraw to update the side panel background
-	InvalidateRect(hWnd, NULL, TRUE);
-	UpdateWindow(hWnd);
+    InvalidateRect(hWnd, NULL, TRUE);
+    UpdateWindow(hWnd);
 }
 
 void DrawTabButton(LPDRAWITEMSTRUCT pDIS, bool isActive)
@@ -822,6 +882,9 @@ void DrawTabButton(LPDRAWITEMSTRUCT pDIS, bool isActive)
     // Draw border - but skip the bottom line if active!
     Color borderColor = isActive ? Color(255, 60, 90, 95) : Color(255, 50, 50, 55);
     Pen borderPen(borderColor, 1.5f);
+
+    // Draw line connecting edge of screen to corner of tab
+    graphics.DrawLine(&borderPen, left - indent * 10, bottom, left, bottom);
     
     if (isActive)
     {
@@ -951,4 +1014,87 @@ void UpdateContentArea(HWND hWnd)
     }
 
     SetWindowTextW(hContentArea, content.str().c_str());
+}
+
+void UpdateCategoryPanel(HWND hWnd)
+{
+    // Show/hide category panel based on current page
+    if (currentPage == PAGE_INVENTORY)
+    {
+        ShowWindow(hCategoryPanel, SW_SHOW);
+        ShowWindow(hCategoryList, SW_SHOW);
+        ShowWindow(hAddCategoryBtn, SW_SHOW);
+    }
+    else
+    {
+        ShowWindow(hCategoryPanel, SW_HIDE);
+        ShowWindow(hCategoryList, SW_HIDE);
+        ShowWindow(hAddCategoryBtn, SW_HIDE);
+    }
+}
+
+void DrawAddCategoryButton(LPDRAWITEMSTRUCT pDIS)
+{
+    HDC hdc = pDIS->hDC;
+    RECT rect = pDIS->rcItem;
+
+    Graphics graphics(hdc);
+    graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+    graphics.SetCompositingQuality(CompositingQualityHighQuality);
+    graphics.SetPixelOffsetMode(PixelOffsetModeHighQuality);
+
+    // Clear background
+    Color bgColor = Color(255, 50, 120, 200); // Nice blue color for add button
+    if (pDIS->itemState & ODS_SELECTED)
+    {
+        bgColor = Color(255, 40, 96, 160); // Darker when pressed
+    }
+
+    // Draw rounded rectangle button
+    int cornerRadius = 8;
+    GraphicsPath path;
+
+    RectF rectF((REAL)rect.left, (REAL)rect.top, (REAL)(rect.right - rect.left), (REAL)(rect.bottom - rect.top));
+
+    // Create rounded rectangle path
+    REAL left = rectF.X;
+    REAL top = rectF.Y;
+    REAL right = rectF.X + rectF.Width;
+    REAL bottom = rectF.Y + rectF.Height;
+
+    RectF topLeft(left, top, cornerRadius * 2, cornerRadius * 2);
+    RectF topRight(right - cornerRadius * 2, top, cornerRadius * 2, cornerRadius * 2);
+    RectF bottomRight(right - cornerRadius * 2, bottom - cornerRadius * 2, cornerRadius * 2, cornerRadius * 2);
+    RectF bottomLeft(left, bottom - cornerRadius * 2, cornerRadius * 2, cornerRadius * 2);
+
+    path.AddArc(topLeft, 180, 90);
+    path.AddArc(topRight, 270, 90);
+    path.AddArc(bottomRight, 0, 90);
+    path.AddArc(bottomLeft, 90, 90);
+    path.CloseFigure();
+
+    // Fill button
+    SolidBrush brush(bgColor);
+    graphics.FillPath(&brush, &path);
+
+    // Draw border
+    Pen borderPen(Color(255, 40, 90, 150), 2.0f);
+    graphics.DrawPath(&borderPen, &path);
+
+    // Draw the "+" text
+    WCHAR buttonText[32];
+    GetWindowTextW(pDIS->hwndItem, buttonText, 32);
+
+    FontFamily fontFamily(L"Segoe UI");
+    Font font(&fontFamily, 24, FontStyleBold, UnitPixel);
+    SolidBrush textBrush(Color(255, 255, 255, 255));
+
+    StringFormat stringFormat;
+    stringFormat.SetAlignment(StringAlignmentCenter);
+    stringFormat.SetLineAlignment(StringAlignmentCenter);
+
+    RectF layoutRect((REAL)rect.left, (REAL)rect.top, (REAL)(rect.right - rect.left), (REAL)(rect.bottom - rect.top));
+
+    graphics.SetTextRenderingHint(TextRenderingHintAntiAlias);
+    graphics.DrawString(buttonText, -1, &font, layoutRect, &stringFormat, &textBrush);
 }
