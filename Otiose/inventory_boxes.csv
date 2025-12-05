@@ -1,0 +1,7 @@
+Name,BulkCount,Quantity,Price,StorageLocation,OrderLink,Notes,LastModified
+Small Box (8x6x4),150,75,1.99,Box Wall - Bottom,https://www.uline.com/BL/S-4511,,1764966776
+Medium Box (12x10x8),100,50,3.49,Box Wall - Middle,,Best seller,1764966776
+Large Box (18x14x12),60,30,4.99,Box Wall - Top,,,1764966776
+Extra Large Box (24x18x18),30,15,7.99,Back Room,,,1764966776
+Picture Box (30x24x3),20,10,9.99,Specialty Section,,For framed items,1764966776
+Mirror Box (48x6x30),16,8,14.99,Specialty Section,,For mirrors/glass,1764966776

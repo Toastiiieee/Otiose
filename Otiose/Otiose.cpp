@@ -12,6 +12,8 @@
 #include <commctrl.h>
 #pragma comment(lib, "comctl32.lib")
 #include <shellapi.h>
+#include <uxtheme.h>
+#pragma comment(lib, "uxtheme.lib")
 #include <string>
 #include <fstream>
 #include <ctime>
@@ -78,6 +80,7 @@ struct InventoryItem {
     std::wstring storageLocation;  // Where item is stored
     std::wstring orderLink;   // Optional URL for ordering more
     std::wstring notes;       // Additional notes
+    time_t lastModified;      // Auto-set timestamp when item is created/edited
 };
 
 // Category enumeration for clarity
@@ -185,6 +188,7 @@ void DeleteSelectedItem(HWND hWnd);
 void SortInventoryList(int column);
 void FilterInventoryList(const std::wstring& filter);
 void SetupListViewColumns(HWND hListView);
+void ResizeLastColumn();
 int GetSelectedInventoryIndex();
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
@@ -607,43 +611,47 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                     return CDRF_NOTIFYITEMDRAW;
 
                 case CDDS_ITEMPREPAINT:
+                    // Just request subitem notifications
                     return CDRF_NOTIFYSUBITEMDRAW;
 
                 case CDDS_SUBITEM | CDDS_ITEMPREPAINT:
                 {
-                    // Dark theme colors
-                    lplvcd->clrText = RGB(220, 220, 220);      // Light gray text
-                    lplvcd->clrTextBk = RGB(45, 45, 50);       // Dark background
+                    int visualRow = (int)lplvcd->nmcd.dwItemSpec;
 
-                    // Alternate row colors for better readability
-                    if (lplvcd->nmcd.dwItemSpec % 2 == 1)
+                    // Query the actual selection state from the ListView
+                    UINT state = ListView_GetItemState(hInventoryList, visualRow, LVIS_SELECTED);
+                    bool isSelected = (state & LVIS_SELECTED) != 0;
+
+                    if (isSelected)
                     {
-                        lplvcd->clrTextBk = RGB(50, 50, 55);   // Slightly lighter for odd rows
+                        lplvcd->clrText = RGB(255, 255, 255);
+                        lplvcd->clrTextBk = RGB(60, 100, 160);
+                    }
+                    else
+                    {
+                        // Alternating row colors
+                        lplvcd->clrText = RGB(220, 220, 220);
+                        lplvcd->clrTextBk = (visualRow % 2 == 0) ? RGB(45, 45, 50) : RGB(50, 50, 55);
                     }
 
-                    // Selected item highlighting
-                    if (lplvcd->nmcd.uItemState & CDIS_SELECTED)
-                    {
-                        lplvcd->clrText = RGB(255, 255, 255);  // White text when selected
-                        lplvcd->clrTextBk = RGB(45, 45, 50); // Blue highlight
-                    }
-
-                    // Make the Order Link column (5) look like a hyperlink
-                    if (lplvcd->iSubItem == 5)
+                    // Make the Order Link column (5) look like a hyperlink (unless selected)
+                    if (lplvcd->iSubItem == 5 && !isSelected)
                     {
                         wchar_t linkText[512];
-                        ListView_GetItemText(hInventoryList, (int)lplvcd->nmcd.dwItemSpec, 5, linkText, 512);
+                        ListView_GetItemText(hInventoryList, visualRow, 5, linkText, 512);
                         if (wcslen(linkText) > 0)
                         {
-                            lplvcd->clrText = RGB(100, 180, 255);  // Light blue for links
+                            lplvcd->clrText = RGB(100, 180, 255);
                         }
                     }
 
                     return CDRF_NEWFONT;
                 }
+
+                default:
+                    return CDRF_DODEFAULT;
                 }
             }
-            break;
             }
         }
 
@@ -924,6 +932,19 @@ std::string TimeToString(time_t t)
     return ss.str();
 }
 
+// Wide string version for inventory display (shorter format)
+std::wstring TimeToWString(time_t t)
+{
+    if (t == 0) return L"";
+
+    struct tm timeinfo;
+    localtime_s(&timeinfo, &t);
+
+    std::wstringstream ss;
+    ss << std::put_time(&timeinfo, L"%m/%d/%y %I:%M %p");
+    return ss.str();
+}
+
 void InitializeCSV()
 {
     std::ifstream checkFile(TIMESHEET_FILE);
@@ -1167,6 +1188,9 @@ void RepositionControls(HWND hWnd)
         int listHeight = contentHeight - searchHeight - 80;  // Leave room for search and buttons
 
         SetWindowPos(hInventoryList, NULL, listX, listY, listWidth, listHeight, SWP_NOZORDER);
+
+        // Resize last column to fill remaining width
+        ResizeLastColumn();
 
         // Position buttons at bottom of content area
         int btnY = listY + listHeight + 10;
@@ -1630,14 +1654,16 @@ void InitializeInventory()
     LoadInventoryFromCSV();
 
     // If no data was loaded, add some sample items
-    // Structure: { name, bulkCount, quantity, price, storageLocation, orderLink, notes }
+    // Structure: { name, bulkCount, quantity, price, storageLocation, orderLink, notes, lastModified }
+    time_t now = time(nullptr);
+
     if (retailInventory.empty())
     {
-        InventoryItem item1 = { L"Bubble Mailer - Small", 100, 50, 2.99, L"Shelf A1", L"https://www.uline.com/BL/S-9854", L"" };
-        InventoryItem item2 = { L"Bubble Mailer - Medium", 75, 35, 3.99, L"Shelf A2", L"", L"" };
-        InventoryItem item3 = { L"Bubble Mailer - Large", 50, 25, 4.99, L"Shelf A3", L"", L"" };
-        InventoryItem item4 = { L"Packing Tape", 200, 100, 5.99, L"Back Room", L"https://www.uline.com/BL/S-423", L"Reorder when below 50" };
-        InventoryItem item5 = { L"Fragile Stickers", 500, 200, 0.25, L"Counter", L"", L"" };
+        InventoryItem item1 = { L"Bubble Mailer - Small", 100, 50, 2.99, L"Shelf A1", L"https://www.uline.com/BL/S-9854", L"", now };
+        InventoryItem item2 = { L"Bubble Mailer - Medium", 75, 35, 3.99, L"Shelf A2", L"", L"", now };
+        InventoryItem item3 = { L"Bubble Mailer - Large", 50, 25, 4.99, L"Shelf A3", L"", L"", now };
+        InventoryItem item4 = { L"Packing Tape", 200, 100, 5.99, L"Back Room", L"https://www.uline.com/BL/S-423", L"Reorder when below 50", now };
+        InventoryItem item5 = { L"Fragile Stickers", 500, 200, 0.25, L"Counter", L"", L"", now };
         retailInventory.push_back(item1);
         retailInventory.push_back(item2);
         retailInventory.push_back(item3);
@@ -1647,11 +1673,11 @@ void InitializeInventory()
 
     if (suppliesInventory.empty())
     {
-        InventoryItem item1 = { L"Receipt Paper Roll", 48, 24, 8.99, L"Office Cabinet", L"", L"" };
-        InventoryItem item2 = { L"Printer Ink - Black", 12, 6, 34.99, L"Office Cabinet", L"", L"For main printer" };
-        InventoryItem item3 = { L"Printer Ink - Color", 8, 4, 44.99, L"Office Cabinet", L"", L"For main printer" };
-        InventoryItem item4 = { L"Shipping Labels", 1000, 500, 0.15, L"Label Station", L"", L"" };
-        InventoryItem item5 = { L"Box Cutter Blades", 100, 50, 0.50, L"Tool Drawer", L"", L"" };
+        InventoryItem item1 = { L"Receipt Paper Roll", 48, 24, 8.99, L"Office Cabinet", L"", L"", now };
+        InventoryItem item2 = { L"Printer Ink - Black", 12, 6, 34.99, L"Office Cabinet", L"", L"For main printer", now };
+        InventoryItem item3 = { L"Printer Ink - Color", 8, 4, 44.99, L"Office Cabinet", L"", L"For main printer", now };
+        InventoryItem item4 = { L"Shipping Labels", 1000, 500, 0.15, L"Label Station", L"", L"", now };
+        InventoryItem item5 = { L"Box Cutter Blades", 100, 50, 0.50, L"Tool Drawer", L"", L"", now };
         suppliesInventory.push_back(item1);
         suppliesInventory.push_back(item2);
         suppliesInventory.push_back(item3);
@@ -1661,12 +1687,12 @@ void InitializeInventory()
 
     if (boxesInventory.empty())
     {
-        InventoryItem item1 = { L"Small Box (8x6x4)", 150, 75, 1.99, L"Box Wall - Bottom", L"https://www.uline.com/BL/S-4511", L"" };
-        InventoryItem item2 = { L"Medium Box (12x10x8)", 100, 50, 3.49, L"Box Wall - Middle", L"", L"Best seller" };
-        InventoryItem item3 = { L"Large Box (18x14x12)", 60, 30, 4.99, L"Box Wall - Top", L"", L"" };
-        InventoryItem item4 = { L"Extra Large Box (24x18x18)", 30, 15, 7.99, L"Back Room", L"", L"" };
-        InventoryItem item5 = { L"Picture Box (30x24x3)", 20, 10, 9.99, L"Specialty Section", L"", L"For framed items" };
-        InventoryItem item6 = { L"Mirror Box (48x6x30)", 16, 8, 14.99, L"Specialty Section", L"", L"For mirrors/glass" };
+        InventoryItem item1 = { L"Small Box (8x6x4)", 150, 75, 1.99, L"Box Wall - Bottom", L"https://www.uline.com/BL/S-4511", L"", now };
+        InventoryItem item2 = { L"Medium Box (12x10x8)", 100, 50, 3.49, L"Box Wall - Middle", L"", L"Best seller", now };
+        InventoryItem item3 = { L"Large Box (18x14x12)", 60, 30, 4.99, L"Box Wall - Top", L"", L"", now };
+        InventoryItem item4 = { L"Extra Large Box (24x18x18)", 30, 15, 7.99, L"Back Room", L"", L"", now };
+        InventoryItem item5 = { L"Picture Box (30x24x3)", 20, 10, 9.99, L"Specialty Section", L"", L"For framed items", now };
+        InventoryItem item6 = { L"Mirror Box (48x6x30)", 16, 8, 14.99, L"Specialty Section", L"", L"For mirrors/glass", now };
         boxesInventory.push_back(item1);
         boxesInventory.push_back(item2);
         boxesInventory.push_back(item3);
@@ -1690,10 +1716,10 @@ std::wstring FormatInventoryDisplay()
 
     // Header
     display << std::left << std::setw(30) << L"Item Name"
-        << std::setw(12) << L"BULK"
+        << std::setw(12) << L"Bulk"
         << std::setw(10) << L"Qty"
         << std::setw(10) << L"Price"
-        << L"Storage Location\n";
+        << L"Location\n";
     display << L"--------------------------------------------------------------------------------\n";
 
     // Items
@@ -1730,7 +1756,7 @@ void SaveInventoryToCSV()
         if (file.is_open())
         {
             // Write header
-            file << "Name,BulkCount,Quantity,Price,StorageLocation,OrderLink,Notes\n";
+            file << "Name,BulkCount,Quantity,Price,StorageLocation,OrderLink,Notes,LastModified\n";
 
             // Write items
             for (const auto& item : inventory)
@@ -1741,7 +1767,8 @@ void SaveInventoryToCSV()
                     << std::fixed << std::setprecision(2) << item.price << ","
                     << wstringToString(item.storageLocation) << ","
                     << wstringToString(item.orderLink) << ","
-                    << wstringToString(item.notes) << "\n";
+                    << wstringToString(item.notes) << ","
+                    << item.lastModified << "\n";
             }
             file.close();
         }
@@ -1789,6 +1816,7 @@ void LoadInventoryFromCSV()
             if (std::getline(ss, token, ',')) item.storageLocation = stringToWstring(token);
             if (std::getline(ss, token, ',')) item.orderLink = stringToWstring(token);
             if (std::getline(ss, token, ',')) item.notes = stringToWstring(token);
+            if (std::getline(ss, token, ',')) item.lastModified = std::stoll(token);
 
             inventory.push_back(item);
         }
@@ -1828,6 +1856,9 @@ void CreateInventoryManagementControls(HWND hWnd)
         WS_CHILD | WS_BORDER | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
         0, 0, 100, 100,  // Position will be set in RepositionControls
         hWnd, (HMENU)IDC_INVENTORY_LIST, hInst, nullptr);
+
+    // Disable Windows visual theme on ListView so our custom colors work
+    SetWindowTheme(hInventoryList, L"", L"");
 
     // Enable full row select (no grid lines - they don't theme well)
     ListView_SetExtendedListViewStyle(hInventoryList,
@@ -1934,6 +1965,36 @@ void SetupListViewColumns(HWND hListView)
     lvc.cx = 150;
     lvc.fmt = LVCFMT_LEFT;
     ListView_InsertColumn(hListView, 6, &lvc);
+
+    // Column 7: Last Edited
+    lvc.iSubItem = 7;
+    lvc.pszText = (LPWSTR)L"Last Edited";
+    lvc.cx = 130;
+    lvc.fmt = LVCFMT_LEFT;
+    ListView_InsertColumn(hListView, 7, &lvc);
+}
+
+// Resize the last column to fill remaining ListView width
+void ResizeLastColumn()
+{
+    if (!hInventoryList) return;
+
+    RECT listRect;
+    GetClientRect(hInventoryList, &listRect);
+    int listWidth = listRect.right - listRect.left;
+
+    // Calculate total width of columns 0-6
+    int usedWidth = 0;
+    for (int i = 0; i < 7; i++)
+    {
+        usedWidth += ListView_GetColumnWidth(hInventoryList, i);
+    }
+
+    // Set last column (7) to fill remaining space
+    int lastColWidth = listWidth - usedWidth - 4;  // -4 for border/padding
+    if (lastColWidth < 100) lastColWidth = 100;    // Minimum width
+
+    ListView_SetColumnWidth(hInventoryList, 7, lastColWidth);
 }
 
 // Show or hide inventory management controls
@@ -2031,6 +2092,11 @@ void RefreshInventoryList()
                 case 6: // Notes
                     cmp = _wcsicmp(a.second->notes.c_str(), b.second->notes.c_str());
                     break;
+                case 7: // Last Edited
+                    if (a.second->lastModified < b.second->lastModified) cmp = -1;
+                    else if (a.second->lastModified > b.second->lastModified) cmp = 1;
+                    else cmp = 0;
+                    break;
                 }
                 return sortAscending ? (cmp < 0) : (cmp > 0);
             });
@@ -2078,6 +2144,10 @@ void RefreshInventoryList()
 
         // Notes column
         ListView_SetItemText(hInventoryList, rowIndex, 6, (LPWSTR)item.notes.c_str());
+
+        // Last Edited column
+        std::wstring lastEditStr = TimeToWString(item.lastModified);
+        ListView_SetItemText(hInventoryList, rowIndex, 7, (LPWSTR)lastEditStr.c_str());
 
         rowIndex++;
     }
@@ -2249,8 +2319,7 @@ INT_PTR CALLBACK ItemDialogProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
             GetDlgItemTextW(hDlg, IDC_EDIT_NAME, buffer, 256);
             dialogItem.name = buffer;
 
-            GetDlgItemTextW(hDlg, IDC_EDIT_BULK, buffer, 256);
-            dialogItem.bulkCount = _wtoi(buffer); // buffer is wchar_t*, bulkCount is int
+            dialogItem.bulkCount = GetDlgItemInt(hDlg, IDC_EDIT_BULK, NULL, FALSE);
 
             dialogItem.quantity = GetDlgItemInt(hDlg, IDC_EDIT_QTY, NULL, FALSE);
 
@@ -2567,6 +2636,9 @@ void ShowAddItemDialog(HWND hWnd)
 
     if (RunItemDialog(hWnd) == IDOK)
     {
+        // Set creation timestamp
+        dialogItem.lastModified = time(nullptr);
+
         // Add the new item to current category
         std::vector<InventoryItem>& inventory = GetCurrentInventory();
         inventory.push_back(dialogItem);
@@ -2598,6 +2670,9 @@ void ShowEditItemDialog(HWND hWnd)
 
     if (RunItemDialog(hWnd) == IDOK)
     {
+        // Update the timestamp
+        dialogItem.lastModified = time(nullptr);
+
         // Update the item
         inventory[actualIndex] = dialogItem;
 
