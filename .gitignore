@@ -363,3 +363,4 @@ MigrationBackup/
 FodyWeavers.xsd
 /Otiose/timesheet.csv
 /Otiose/mailboxes.csv
+/Otiose/mailbox_holders.dat
