@@ -14,6 +14,8 @@
 #include <shellapi.h>
 #include <uxtheme.h>
 #pragma comment(lib, "uxtheme.lib")
+#include <wincrypt.h>
+#pragma comment(lib, "crypt32.lib")
 #include <string>
 #include <fstream>
 #include <ctime>
@@ -21,6 +23,9 @@
 #include <iomanip>
 #include <algorithm>
 #include <vector>
+#include <array>
+#include <functional>
+#include <map>
 
 using namespace Gdiplus;
 using std::min;
@@ -42,6 +47,28 @@ using std::min;
 #define IDC_INVENTORY_LIST 3004
 #define IDC_SEARCH_BOX 3005
 #define IDC_SEARCH_LABEL 3006
+
+// Mailbox management control IDs
+#define IDC_MAILBOX_LIST 5001
+#define IDC_MAILBOX_DETAILS_PANEL 5002
+#define IDC_MAILBOX_SEARCH_BOX 5003
+#define IDC_MAILBOX_SEARCH_LABEL 5004
+#define IDC_MAILBOX_EDIT_BTN 5005
+
+// Mailbox inline edit control IDs
+#define IDC_MB_EDIT_STATUS 5010
+#define IDC_MB_EDIT_START 5011
+#define IDC_MB_EDIT_END 5012
+#define IDC_MB_EDIT_SIZE 5013
+#define IDC_MB_EDIT_USETYPE 5014
+#define IDC_MB_EDIT_BUSINESS 5015
+#define IDC_MB_EDIT_HOLDERS 5017
+#define IDC_MB_EDIT_AUTORENEW 5018
+#define IDC_MB_EDIT_NOTES 5019
+#define IDC_MB_SAVE_BTN 5020
+#define IDC_MB_CANCEL_BTN 5021
+#define IDC_MB_EDIT_HOLDER_BASE 5030  // 5030-5039 for holder name fields
+#define IDC_MB_REVEAL_BTN 5040        // Button to reveal/hide names
 
 // Dialog control IDs
 #define IDC_EDIT_NAME 4001
@@ -90,6 +117,46 @@ enum Category {
     CAT_BOXES = 2
 };
 
+// Mailbox status enumeration
+enum MailboxStatus {
+    MB_CLOSED = 0,
+    MB_OPEN = 1,
+    MB_LATE = 2
+};
+
+// Mailbox size enumeration
+enum MailboxSize {
+    MB_SIZE_SMALL = 0,
+    MB_SIZE_MEDIUM = 1,
+    MB_SIZE_LARGE = 2
+};
+
+// Maximum number of holders per mailbox
+const int MAX_HOLDERS = 10;
+
+// Mailbox structure
+struct Mailbox {
+    int boxNumber;                    // 100-399
+    MailboxStatus status;             // Closed/Open/Late
+    time_t termStartDate;             // Start date of current term (0 if closed)
+    time_t termEndDate;               // End date of term or termination date
+    int holderCount;                  // Number of people on the box (1-10)
+    MailboxSize size;                 // Small/Medium/Large
+    bool isBusinessUse;               // Personal or Business
+    std::wstring businessName;        // Business name (if business use)
+    bool autoRenewal;                 // Auto-renewal enabled
+    std::wstring notes;               // Notes field
+
+    // Holder names (encrypted in storage, decrypted in memory when needed)
+    std::array<std::wstring, MAX_HOLDERS> holderNames;  // Actual names (decrypted)
+    std::array<std::wstring, MAX_HOLDERS> holderHashes; // Searchable hashes
+
+    // Primary holder is always holderNames[0]
+    std::wstring getPrimaryHolder() const {
+        return holderCount > 0 ? holderNames[0] : L"";
+    }
+};
+
 // Global Variables:
 HINSTANCE hInst;                                // current instance
 WCHAR szTitle[MAX_LOADSTRING];                  // The title bar text
@@ -126,6 +193,42 @@ std::vector<InventoryItem> retailInventory;
 std::vector<InventoryItem> suppliesInventory;
 std::vector<InventoryItem> boxesInventory;
 
+// Mailbox management UI elements
+HWND hMailboxList;          // ListView for mailboxes
+HWND hMailboxDetailsPanel;  // Right-side details panel
+HWND hMailboxSearchBox;     // Search/filter text box
+HWND hMailboxSearchLabel;   // Label for search box
+HWND hMailboxEditBtn;       // Edit selected mailbox button
+int selectedMailboxIndex = -1;  // Currently selected mailbox in list (-1 = none)
+
+// Mailbox inline edit controls
+HWND hMbEditStatus;         // Combo box for status
+HWND hMbEditStart;          // Date picker for start date
+HWND hMbEditEnd;            // Date picker for end date
+HWND hMbEditSize;           // Combo box for size
+HWND hMbEditUseType;        // Combo box for personal/business
+HWND hMbEditBusiness;       // Edit box for business name
+HWND hMbEditHolders;        // Combo box for holder count (1-10)
+HWND hMbEditAutoRenew;      // Checkbox for auto-renewal
+HWND hMbEditNotes;          // Edit box for notes
+HWND hMbSaveBtn;            // Save button
+HWND hMbCancelBtn;          // Cancel button
+HWND hMbRevealBtn;          // Button to reveal/hide holder names
+std::array<HWND, MAX_HOLDERS> hMbEditHolderNames;  // Edit boxes for holder names
+bool mailboxEditMode = false;  // Whether we're in edit mode
+int editingMailboxActualIndex = -1;  // Actual index in mailboxes vector being edited
+bool holderNamesRevealed = false;  // Whether holder names are currently shown
+
+// Mailbox sorting state
+int mailboxSortColumn = 0;      // Currently sorted column (default: box number)
+bool mailboxSortAscending = true;  // Sort direction
+
+// Mailbox search/filter state
+std::wstring mailboxSearchFilter;  // Current search filter text
+
+// Mailbox storage
+std::vector<Mailbox> mailboxes;  // All 300 mailboxes (100-399)
+
 // Clock In/Out System Variables
 Shift currentShift;
 ULONG_PTR gdiplusToken; // For GDI+ initialization
@@ -133,7 +236,7 @@ HFONT hStatusFont; // Font for status text
 
 // UI State
 Page currentPage = PAGE_INVENTORY;
-bool sidePanelOpen = true;
+bool sidePanelOpen = false;
 const int SIDE_PANEL_WIDTH = 250;
 const int TAB_BAR_HEIGHT = 50;
 const int TOGGLE_BTN_WIDTH = 30;
@@ -186,10 +289,42 @@ void ShowAddItemDialog(HWND hWnd);
 void ShowEditItemDialog(HWND hWnd);
 void DeleteSelectedItem(HWND hWnd);
 void SortInventoryList(int column);
-void FilterInventoryList(const std::wstring& filter);
 void SetupListViewColumns(HWND hListView);
 void ResizeLastColumn();
 int GetSelectedInventoryIndex();
+
+// Mailbox functions
+void InitializeMailboxes();
+void SaveMailboxesToCSV();
+void LoadMailboxesFromCSV();
+void CreateMailboxManagementControls(HWND hWnd);
+void ShowMailboxControls(bool show);
+void SetupMailboxListColumns(HWND hListView);
+void RefreshMailboxList();
+void UpdateMailboxDetailsPanel();
+void SortMailboxList(int column);
+void FilterMailboxList(const std::wstring& filter);
+void ResizeMailboxLastColumn();
+std::wstring GetMailboxStatusString(MailboxStatus status);
+std::wstring GetMailboxSizeString(MailboxSize size);
+std::wstring FormatDateShort(time_t t);
+void CreateMailboxEditControls(HWND hWnd);
+void ShowMailboxEditControls(bool show);
+void EnterMailboxEditMode();
+void ExitMailboxEditMode(bool save);
+void PositionMailboxEditControls();
+time_t ParseDateString(const std::wstring& dateStr);
+void CheckMailboxLateStatus();  // Auto-detect late mailboxes
+void UpdateHolderFieldsVisibility(int count);  // Show/hide holder name fields
+void ToggleHolderNamesReveal();  // Toggle masked/revealed state
+std::wstring MaskName(const std::wstring& name);  // Returns masked version of name
+
+// Encryption/Hashing functions for secure holder name storage
+std::wstring EncryptString(const std::wstring& plainText);
+std::wstring DecryptString(const std::wstring& encryptedBase64);
+std::wstring HashStringForSearch(const std::wstring& text);
+void SaveSecureHolderData();
+void LoadSecureHolderData();
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     _In_opt_ HINSTANCE hPrevInstance,
@@ -199,10 +334,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     UNREFERENCED_PARAMETER(hPrevInstance);
     UNREFERENCED_PARAMETER(lpCmdLine);
 
-    // Initialize Common Controls (required for ListView)
+    // Initialize Common Controls (required for ListView and Date/Time Picker)
     INITCOMMONCONTROLSEX icex;
     icex.dwSize = sizeof(INITCOMMONCONTROLSEX);
-    icex.dwICC = ICC_LISTVIEW_CLASSES;
+    icex.dwICC = ICC_LISTVIEW_CLASSES | ICC_DATE_CLASSES;
     InitCommonControlsEx(&icex);
 
     // Initialize GDI+
@@ -362,6 +497,9 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
     // Create inventory management controls
     CreateInventoryManagementControls(hWnd);
 
+    // Create mailbox management controls
+    CreateMailboxManagementControls(hWnd);
+
     UpdateContentArea(hWnd);
     UpdateCategoryPanel(hWnd);
 
@@ -438,6 +576,56 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 GetWindowTextW(hSearchBox, searchText, 256);
                 searchFilter = searchText;
                 RefreshInventoryList();
+            }
+            break;
+
+        case IDC_MAILBOX_SEARCH_BOX:
+            // Handle mailbox search box text changes
+            if (HIWORD(wParam) == EN_CHANGE)
+            {
+                // Cancel edit mode when searching
+                if (mailboxEditMode)
+                {
+                    ExitMailboxEditMode(false);
+                }
+
+                wchar_t searchText[256];
+                GetWindowTextW(hMailboxSearchBox, searchText, 256);
+                mailboxSearchFilter = searchText;
+                RefreshMailboxList();
+            }
+            break;
+
+        case IDC_MAILBOX_EDIT_BTN:
+            // Enter edit mode for selected mailbox
+            if (selectedMailboxIndex >= 0 && !mailboxEditMode)
+            {
+                EnterMailboxEditMode();
+            }
+            break;
+
+        case IDC_MB_SAVE_BTN:
+            // Save changes and exit edit mode
+            ExitMailboxEditMode(true);
+            break;
+
+        case IDC_MB_CANCEL_BTN:
+            // Discard changes and exit edit mode
+            ExitMailboxEditMode(false);
+            break;
+
+        case IDC_MB_REVEAL_BTN:
+            // Toggle holder names visibility
+            ToggleHolderNamesReveal();
+            break;
+
+        case IDC_MB_EDIT_HOLDERS:
+            // Holder count changed - update visible fields
+            if (HIWORD(wParam) == CBN_SELCHANGE)
+            {
+                int count = (int)SendMessageW(hMbEditHolders, CB_GETCURSEL, 0, 0) + 1;
+                UpdateHolderFieldsVisibility(count);
+                PositionMailboxEditControls();  // Reposition everything
             }
             break;
 
@@ -522,6 +710,221 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         else if (pDIS->CtlID == IDC_DELETE_ITEM_BTN)
         {
             DrawInventoryButton(pDIS, L"Delete", RGB(200, 60, 60));
+            return TRUE;
+        }
+        else if (pDIS->CtlID == IDC_MAILBOX_EDIT_BTN)
+        {
+            DrawInventoryButton(pDIS, L"Edit Mailbox", RGB(60, 130, 200));
+            return TRUE;
+        }
+        else if (pDIS->CtlID == IDC_MB_SAVE_BTN)
+        {
+            DrawInventoryButton(pDIS, L"Save", RGB(40, 160, 80));
+            return TRUE;
+        }
+        else if (pDIS->CtlID == IDC_MB_CANCEL_BTN)
+        {
+            DrawInventoryButton(pDIS, L"Cancel", RGB(120, 120, 120));
+            return TRUE;
+        }
+        else if (pDIS->CtlID == IDC_MB_REVEAL_BTN)
+        {
+            DrawInventoryButton(pDIS, holderNamesRevealed ? L"Hide" : L"Show", RGB(80, 80, 120));
+            return TRUE;
+        }
+        else if (pDIS->CtlID == IDC_MAILBOX_DETAILS_PANEL)
+        {
+            // Draw the mailbox details panel
+            HDC hdc = pDIS->hDC;
+            RECT rect = pDIS->rcItem;
+
+            // Create GDI+ graphics for smooth rendering
+            Graphics graphics(hdc);
+            graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+            graphics.SetTextRenderingHint(TextRenderingHintAntiAlias);
+
+            // Draw dark background
+            SolidBrush bgBrush(Color(255, 40, 40, 45));
+            graphics.FillRectangle(&bgBrush, (REAL)rect.left, (REAL)rect.top, (REAL)(rect.right - rect.left), (REAL)(rect.bottom - rect.top));
+
+            // Draw border
+            Pen borderPen(Color(255, 60, 60, 65), 1.0f);
+            graphics.DrawRectangle(&borderPen, (REAL)rect.left, (REAL)rect.top, (REAL)(rect.right - rect.left - 1), (REAL)(rect.bottom - rect.top - 1));
+
+            // Set up fonts
+            FontFamily fontFamily(L"Segoe UI");
+            Font titleFont(&fontFamily, 16, FontStyleBold, UnitPixel);
+            Font labelFont(&fontFamily, 12, FontStyleBold, UnitPixel);
+            Font valueFont(&fontFamily, 12, FontStyleRegular, UnitPixel);
+            Font smallFont(&fontFamily, 10, FontStyleRegular, UnitPixel);
+            SolidBrush titleBrush(Color(255, 100, 180, 255));
+            SolidBrush labelBrush(Color(255, 150, 150, 150));
+            SolidBrush valueBrush(Color(255, 220, 220, 220));
+
+            int padding = 15;
+            int y = padding;
+            int labelX = padding;
+            int valueX = padding + 100;
+            int rowHeight = 26;
+
+            if (selectedMailboxIndex >= 0)
+            {
+                // Get the actual mailbox from the ListView's lParam
+                LVITEM lvi = { 0 };
+                lvi.mask = LVIF_PARAM;
+                lvi.iItem = selectedMailboxIndex;
+                ListView_GetItem(hMailboxList, &lvi);
+                int actualIndex = (int)lvi.lParam;
+
+                if (actualIndex >= 0 && actualIndex < (int)mailboxes.size())
+                {
+                    Mailbox& mb = mailboxes[actualIndex];
+
+                    // Title
+                    std::wstring title = L"Mailbox #" + std::to_wstring(mb.boxNumber);
+                    if (mailboxEditMode)
+                        title += L" - Editing";
+                    graphics.DrawString(title.c_str(), -1, &titleFont, PointF((REAL)labelX, (REAL)y), &titleBrush);
+                    y += rowHeight + 5;
+
+                    // Horizontal line separator
+                    Pen linePen(Color(255, 60, 60, 65), 1.0f);
+                    graphics.DrawLine(&linePen, (REAL)labelX, (REAL)y, (REAL)(rect.right - padding), (REAL)y);
+                    y += 10;
+
+                    if (mailboxEditMode)
+                    {
+                        // In edit mode, just draw labels - edit controls will show values
+                        graphics.DrawString(L"Status:", -1, &labelFont, PointF((REAL)labelX, (REAL)y), &labelBrush);
+                        y += rowHeight;
+                        graphics.DrawString(L"Start Date:", -1, &labelFont, PointF((REAL)labelX, (REAL)y), &labelBrush);
+                        y += rowHeight;
+                        graphics.DrawString(L"End Date:", -1, &labelFont, PointF((REAL)labelX, (REAL)y), &labelBrush);
+                        y += rowHeight;
+                        graphics.DrawString(L"Size:", -1, &labelFont, PointF((REAL)labelX, (REAL)y), &labelBrush);
+                        y += rowHeight;
+                        graphics.DrawString(L"Use Type:", -1, &labelFont, PointF((REAL)labelX, (REAL)y), &labelBrush);
+                        y += rowHeight;
+                        graphics.DrawString(L"Business:", -1, &labelFont, PointF((REAL)labelX, (REAL)y), &labelBrush);
+                        y += rowHeight;
+                        graphics.DrawString(L"Auto-Renew:", -1, &labelFont, PointF((REAL)labelX, (REAL)y), &labelBrush);
+                        y += rowHeight;
+                        graphics.DrawString(L"Notes:", -1, &labelFont, PointF((REAL)labelX, (REAL)y), &labelBrush);
+                        y += rowHeight + 5;
+                        // Holders section at the end
+                        graphics.DrawString(L"Holders:", -1, &labelFont, PointF((REAL)labelX, (REAL)y), &labelBrush);
+                        y += rowHeight;
+                        // Draw holder name labels
+                        int holderCount = (int)SendMessageW(hMbEditHolders, CB_GETCURSEL, 0, 0) + 1;
+                        for (int i = 0; i < holderCount && i < MAX_HOLDERS; i++)
+                        {
+                            std::wstring holderLabel = (i == 0) ? L"  Primary:" : L"  Holder " + std::to_wstring(i + 1) + L":";
+                            graphics.DrawString(holderLabel.c_str(), -1, &smallFont, PointF((REAL)labelX, (REAL)y), &labelBrush);
+                            y += rowHeight;
+                        }
+                    }
+                    else
+                    {
+                        // Normal view mode - draw labels and values
+                        // Status
+                        graphics.DrawString(L"Status:", -1, &labelFont, PointF((REAL)labelX, (REAL)y), &labelBrush);
+                        std::wstring statusStr = GetMailboxStatusString(mb.status);
+                        SolidBrush statusBrush(
+                            mb.status == MB_OPEN ? Color(255, 80, 200, 120) :
+                            mb.status == MB_LATE ? Color(255, 255, 100, 100) :
+                            Color(255, 150, 150, 150));
+                        graphics.DrawString(statusStr.c_str(), -1, &valueFont, PointF((REAL)valueX, (REAL)y), &statusBrush);
+                        y += rowHeight;
+
+                        // Start Date
+                        graphics.DrawString(L"Start Date:", -1, &labelFont, PointF((REAL)labelX, (REAL)y), &labelBrush);
+                        std::wstring startStr = (mb.status != MB_CLOSED && mb.termStartDate > 0)
+                            ? FormatDateShort(mb.termStartDate) : L"--";
+                        graphics.DrawString(startStr.c_str(), -1, &valueFont, PointF((REAL)valueX, (REAL)y), &valueBrush);
+                        y += rowHeight;
+
+                        // End Date
+                        graphics.DrawString(L"End Date:", -1, &labelFont, PointF((REAL)labelX, (REAL)y), &labelBrush);
+                        std::wstring endStr = (mb.termEndDate > 0) ? FormatDateShort(mb.termEndDate) : L"--";
+                        graphics.DrawString(endStr.c_str(), -1, &valueFont, PointF((REAL)valueX, (REAL)y), &valueBrush);
+                        y += rowHeight;
+
+                        // Size
+                        graphics.DrawString(L"Size:", -1, &labelFont, PointF((REAL)labelX, (REAL)y), &labelBrush);
+                        std::wstring sizeStr = GetMailboxSizeString(mb.size);
+                        graphics.DrawString(sizeStr.c_str(), -1, &valueFont, PointF((REAL)valueX, (REAL)y), &valueBrush);
+                        y += rowHeight;
+
+                        // Use Type
+                        graphics.DrawString(L"Use Type:", -1, &labelFont, PointF((REAL)labelX, (REAL)y), &labelBrush);
+                        std::wstring useStr = mb.isBusinessUse ? L"Business" : L"Personal";
+                        graphics.DrawString(useStr.c_str(), -1, &valueFont, PointF((REAL)valueX, (REAL)y), &valueBrush);
+                        y += rowHeight;
+
+                        // Business Name (if applicable)
+                        if (mb.isBusinessUse && !mb.businessName.empty())
+                        {
+                            graphics.DrawString(L"Business:", -1, &labelFont, PointF((REAL)labelX, (REAL)y), &labelBrush);
+                            graphics.DrawString(mb.businessName.c_str(), -1, &valueFont, PointF((REAL)valueX, (REAL)y), &valueBrush);
+                            y += rowHeight;
+                        }
+
+                        // Auto-Renewal
+                        graphics.DrawString(L"Auto-Renew:", -1, &labelFont, PointF((REAL)labelX, (REAL)y), &labelBrush);
+                        std::wstring autoRenewStr = mb.autoRenewal ? L"\u2713 Yes" : L"No";
+                        SolidBrush autoRenewBrush(mb.autoRenewal ? Color(255, 80, 200, 120) : Color(255, 150, 150, 150));
+                        graphics.DrawString(autoRenewStr.c_str(), -1, &valueFont, PointF((REAL)valueX, (REAL)y), &autoRenewBrush);
+                        y += rowHeight;
+
+                        // Notes
+                        if (!mb.notes.empty())
+                        {
+                            graphics.DrawString(L"Notes:", -1, &labelFont, PointF((REAL)labelX, (REAL)y), &labelBrush);
+                            // Truncate if too long
+                            std::wstring notesDisplay = mb.notes;
+                            if (notesDisplay.length() > 30)
+                                notesDisplay = notesDisplay.substr(0, 27) + L"...";
+                            graphics.DrawString(notesDisplay.c_str(), -1, &valueFont, PointF((REAL)valueX, (REAL)y), &valueBrush);
+                            y += rowHeight;
+                        }
+
+                        // Holders section (at the end)
+                        graphics.DrawString(L"Holders:", -1, &labelFont, PointF((REAL)labelX, (REAL)y), &labelBrush);
+                        std::wstring holdersStr = std::to_wstring(mb.holderCount);
+                        graphics.DrawString(holdersStr.c_str(), -1, &valueFont, PointF((REAL)valueX, (REAL)y), &valueBrush);
+                        y += rowHeight;
+
+                        // Show holder names (masked or revealed)
+                        for (int i = 0; i < mb.holderCount && i < MAX_HOLDERS; i++)
+                        {
+                            std::wstring holderLabel = (i == 0) ? L"  Primary:" : L"  Holder " + std::to_wstring(i + 1) + L":";
+                            graphics.DrawString(holderLabel.c_str(), -1, &smallFont, PointF((REAL)labelX, (REAL)y), &labelBrush);
+
+                            std::wstring holderName;
+                            if (mb.holderNames[i].empty())
+                                holderName = L"--";
+                            else if (holderNamesRevealed)
+                                holderName = mb.holderNames[i];
+                            else
+                                holderName = MaskName(mb.holderNames[i]);
+                            graphics.DrawString(holderName.c_str(), -1, &valueFont, PointF((REAL)valueX, (REAL)y), &valueBrush);
+                            y += rowHeight;
+                        }
+                    }
+                }
+            }
+            else
+            {
+                // No selection - show placeholder
+                SolidBrush placeholderBrush(Color(255, 100, 100, 100));
+                StringFormat format;
+                format.SetAlignment(StringAlignmentCenter);
+                format.SetLineAlignment(StringAlignmentCenter);
+
+                RectF layoutRect((REAL)rect.left, (REAL)rect.top, (REAL)(rect.right - rect.left), (REAL)(rect.bottom - rect.top));
+                graphics.DrawString(L"Select a mailbox\nto view details", -1, &valueFont, layoutRect, &format, &placeholderBrush);
+            }
+
             return TRUE;
         }
     }
@@ -655,7 +1058,117 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             }
         }
 
-        // Handle header custom draw for dark theme
+        // Handle mailbox list notifications
+        if (pnmh->idFrom == IDC_MAILBOX_LIST)
+        {
+            switch (pnmh->code)
+            {
+            case LVN_COLUMNCLICK:
+            {
+                // Cancel edit mode before sorting
+                if (mailboxEditMode)
+                {
+                    ExitMailboxEditMode(false);
+                }
+
+                LPNMLISTVIEW pnmlv = (LPNMLISTVIEW)lParam;
+                SortMailboxList(pnmlv->iSubItem);
+            }
+            break;
+
+            case LVN_ITEMCHANGED:
+            {
+                LPNMLISTVIEW pnmlv = (LPNMLISTVIEW)lParam;
+                if (pnmlv->uNewState & LVIS_SELECTED)
+                {
+                    // If we're in edit mode and selecting a different item, cancel edit mode
+                    if (mailboxEditMode)
+                    {
+                        ExitMailboxEditMode(false);  // Cancel without saving
+                    }
+
+                    selectedMailboxIndex = pnmlv->iItem;
+                    EnableWindow(hMailboxEditBtn, TRUE);
+                    UpdateMailboxDetailsPanel();
+                }
+                else if (ListView_GetSelectedCount(hMailboxList) == 0)
+                {
+                    // If we're in edit mode and losing selection, cancel edit mode
+                    if (mailboxEditMode)
+                    {
+                        ExitMailboxEditMode(false);
+                    }
+
+                    selectedMailboxIndex = -1;
+                    EnableWindow(hMailboxEditBtn, FALSE);
+                    UpdateMailboxDetailsPanel();
+                }
+            }
+            break;
+
+            case NM_DBLCLK:
+            {
+                // Double-click to enter edit mode
+                if (selectedMailboxIndex >= 0 && !mailboxEditMode)
+                {
+                    EnterMailboxEditMode();
+                }
+            }
+            break;
+
+            case NM_CUSTOMDRAW:
+            {
+                LPNMLVCUSTOMDRAW lplvcd = (LPNMLVCUSTOMDRAW)lParam;
+
+                switch (lplvcd->nmcd.dwDrawStage)
+                {
+                case CDDS_PREPAINT:
+                    return CDRF_NOTIFYITEMDRAW;
+
+                case CDDS_ITEMPREPAINT:
+                    return CDRF_NOTIFYSUBITEMDRAW;
+
+                case CDDS_SUBITEM | CDDS_ITEMPREPAINT:
+                {
+                    int visualRow = (int)lplvcd->nmcd.dwItemSpec;
+                    UINT state = ListView_GetItemState(hMailboxList, visualRow, LVIS_SELECTED);
+                    bool isSelected = (state & LVIS_SELECTED) != 0;
+
+                    if (isSelected)
+                    {
+                        lplvcd->clrText = RGB(255, 255, 255);
+                        lplvcd->clrTextBk = RGB(60, 100, 160);
+                    }
+                    else
+                    {
+                        lplvcd->clrText = RGB(220, 220, 220);
+                        lplvcd->clrTextBk = (visualRow % 2 == 0) ? RGB(45, 45, 50) : RGB(50, 50, 55);
+                    }
+
+                    // Color-code the status column (column 1)
+                    if (lplvcd->iSubItem == 1 && !isSelected)
+                    {
+                        wchar_t statusText[32];
+                        ListView_GetItemText(hMailboxList, visualRow, 1, statusText, 32);
+                        if (wcscmp(statusText, L"Open") == 0)
+                            lplvcd->clrText = RGB(80, 200, 120);  // Green for open
+                        else if (wcscmp(statusText, L"Late") == 0)
+                            lplvcd->clrText = RGB(255, 100, 100); // Red for late
+                        else
+                            lplvcd->clrText = RGB(150, 150, 150); // Gray for closed
+                    }
+
+                    return CDRF_NEWFONT;
+                }
+
+                default:
+                    return CDRF_DODEFAULT;
+                }
+            }
+            }
+        }
+
+        // Handle header custom draw for dark theme (inventory)
         HWND hHeader = ListView_GetHeader(hInventoryList);
         if (pnmh->hwndFrom == hHeader && pnmh->code == NM_CUSTOMDRAW)
         {
@@ -691,6 +1204,49 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 DrawTextW(pnmcd->hdc, headerText, -1, &textRect, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
 
                 // Draw a subtle border
+                HPEN hPen = CreatePen(PS_SOLID, 1, RGB(70, 70, 75));
+                HPEN hOldPen = (HPEN)SelectObject(pnmcd->hdc, hPen);
+                MoveToEx(pnmcd->hdc, pnmcd->rc.right - 1, pnmcd->rc.top, NULL);
+                LineTo(pnmcd->hdc, pnmcd->rc.right - 1, pnmcd->rc.bottom);
+                SelectObject(pnmcd->hdc, hOldPen);
+                DeleteObject(hPen);
+
+                return CDRF_SKIPDEFAULT;
+            }
+            }
+        }
+
+        // Handle header custom draw for dark theme (mailbox)
+        HWND hMailboxHeader = ListView_GetHeader(hMailboxList);
+        if (pnmh->hwndFrom == hMailboxHeader && pnmh->code == NM_CUSTOMDRAW)
+        {
+            LPNMCUSTOMDRAW pnmcd = (LPNMCUSTOMDRAW)lParam;
+
+            switch (pnmcd->dwDrawStage)
+            {
+            case CDDS_PREPAINT:
+                return CDRF_NOTIFYITEMDRAW;
+
+            case CDDS_ITEMPREPAINT:
+            {
+                HBRUSH hBrush = CreateSolidBrush(RGB(50, 50, 55));
+                FillRect(pnmcd->hdc, &pnmcd->rc, hBrush);
+                DeleteObject(hBrush);
+
+                SetTextColor(pnmcd->hdc, RGB(200, 200, 200));
+                SetBkMode(pnmcd->hdc, TRANSPARENT);
+
+                HDITEM hdi = { 0 };
+                wchar_t headerText[64] = { 0 };
+                hdi.mask = HDI_TEXT;
+                hdi.pszText = headerText;
+                hdi.cchTextMax = 64;
+                Header_GetItem(hMailboxHeader, pnmcd->dwItemSpec, &hdi);
+
+                RECT textRect = pnmcd->rc;
+                textRect.left += 6;
+                DrawTextW(pnmcd->hdc, headerText, -1, &textRect, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+
                 HPEN hPen = CreatePen(PS_SOLID, 1, RGB(70, 70, 75));
                 HPEN hOldPen = (HPEN)SelectObject(pnmcd->hdc, hPen);
                 MoveToEx(pnmcd->hdc, pnmcd->rc.right - 1, pnmcd->rc.top, NULL);
@@ -1209,6 +1765,50 @@ void RepositionControls(HWND hWnd)
         ShowInventoryControls(false);
     }
 
+    // Reposition mailbox management controls
+    if (currentPage == PAGE_MAILBOX)
+    {
+        int detailsPanelWidth = 280;  // Width of the details panel on the right
+        int listX = contentX + 10;
+        int searchY = TAB_BAR_HEIGHT + 10;
+        int searchHeight = 25;
+        int searchLabelWidth = 60;
+        int searchBoxWidth = 250;
+
+        // Position search label and box at top
+        SetWindowPos(hMailboxSearchLabel, NULL, listX, searchY + 3, searchLabelWidth, searchHeight, SWP_NOZORDER);
+        SetWindowPos(hMailboxSearchBox, NULL, listX + searchLabelWidth + 5, searchY, searchBoxWidth, searchHeight, SWP_NOZORDER);
+
+        int listY = searchY + searchHeight + 10;
+        int listWidth = contentWidth - detailsPanelWidth - 30;  // Leave room for details panel
+        int listHeight = contentHeight - searchHeight - 80;  // Leave room for search and buttons
+
+        SetWindowPos(hMailboxList, NULL, listX, listY, listWidth, listHeight, SWP_NOZORDER);
+
+        // Resize last column to fill remaining width
+        ResizeMailboxLastColumn();
+
+        // Position details panel on the right side of the main list
+        int detailsX = listX + listWidth + 10;
+        SetWindowPos(hMailboxDetailsPanel, NULL, detailsX, listY, detailsPanelWidth, listHeight, SWP_NOZORDER);
+
+        // Position edit button at bottom
+        int btnY = listY + listHeight + 10;
+        int btnWidth = 120;
+        int btnHeight = 35;
+
+        SetWindowPos(hMailboxEditBtn, NULL, listX, btnY, btnWidth, btnHeight, SWP_NOZORDER);
+
+        // Position reveal button next to edit button (for view mode)
+        SetWindowPos(hMbRevealBtn, NULL, listX + btnWidth + 10, btnY, 100, btnHeight, SWP_NOZORDER);
+
+        ShowMailboxControls(true);
+    }
+    else
+    {
+        ShowMailboxControls(false);
+    }
+
     // Force a full window redraw to update the side panel background
     InvalidateRect(hWnd, NULL, TRUE);
     UpdateWindow(hWnd);
@@ -1393,9 +1993,8 @@ void UpdateContentArea(HWND hWnd)
         break;
 
     case PAGE_MAILBOX:
-        content << L"MAILBOX MANAGEMENT\n\n";
-        content << L"This is where mailbox management will go.\n";
-        content << L"Track customer mailboxes and their details.";
+        // Mailbox page uses custom controls, no static content needed
+        content << L"";
         break;
 
     case PAGE_SCHEDULE:
@@ -2049,6 +2648,9 @@ bool ItemMatchesFilter(const InventoryItem& item, const std::wstring& filter)
 // Refresh the inventory ListView with current category items
 void RefreshInventoryList()
 {
+    // Disable redrawing to prevent flicker
+    SendMessage(hInventoryList, WM_SETREDRAW, FALSE, 0);
+
     // Clear the ListView
     ListView_DeleteAllItems(hInventoryList);
 
@@ -2151,6 +2753,10 @@ void RefreshInventoryList()
 
         rowIndex++;
     }
+
+    // Re-enable redrawing and refresh
+    SendMessage(hInventoryList, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(hInventoryList, NULL, TRUE);
 
     // Clear selection
     selectedItemIndex = -1;
@@ -2708,4 +3314,1436 @@ void DeleteSelectedItem(HWND hWnd)
         SaveInventoryToCSV();
         RefreshInventoryList();
     }
+}
+
+// ============================================================================
+// MAILBOX MANAGEMENT FUNCTIONS
+// ============================================================================
+
+// Helper function to get status string
+std::wstring GetMailboxStatusString(MailboxStatus status)
+{
+    switch (status)
+    {
+    case MB_OPEN: return L"Open";
+    case MB_LATE: return L"Late";
+    case MB_CLOSED:
+    default: return L"Closed";
+    }
+}
+
+// Helper function to get size string
+std::wstring GetMailboxSizeString(MailboxSize size)
+{
+    switch (size)
+    {
+    case MB_SIZE_SMALL: return L"Small";
+    case MB_SIZE_MEDIUM: return L"Medium";
+    case MB_SIZE_LARGE: return L"Large";
+    default: return L"Small";
+    }
+}
+
+// Helper function to format date in short form (MM/DD/YY)
+std::wstring FormatDateShort(time_t t)
+{
+    if (t == 0) return L"--";
+
+    struct tm timeinfo;
+    localtime_s(&timeinfo, &t);
+
+    std::wstringstream ss;
+    ss << std::put_time(&timeinfo, L"%m/%d/%y");
+    return ss.str();
+}
+
+// Initialize all 300 mailboxes (100-399)
+void InitializeMailboxes()
+{
+    // Try to load from CSV first
+    LoadMailboxesFromCSV();
+
+    // If no data was loaded, create default mailboxes
+    if (mailboxes.empty())
+    {
+        for (int i = 100; i <= 399; i++)
+        {
+            Mailbox mb;
+            mb.boxNumber = i;
+            mb.status = MB_CLOSED;
+            mb.termStartDate = 0;
+            mb.termEndDate = 0;
+            mb.holderCount = 1;
+            mb.size = MB_SIZE_SMALL;  // Default size
+            mb.isBusinessUse = false;
+            mb.businessName = L"";
+            mb.autoRenewal = false;
+            mb.notes = L"";
+            // Initialize holder arrays
+            for (int j = 0; j < MAX_HOLDERS; j++)
+            {
+                mb.holderNames[j] = L"";
+                mb.holderHashes[j] = L"";
+            }
+            mailboxes.push_back(mb);
+        }
+
+        // Save the initial state
+        SaveMailboxesToCSV();
+    }
+
+    // Load encrypted holder data
+    LoadSecureHolderData();
+
+    // Check for late mailboxes on startup
+    CheckMailboxLateStatus();
+}
+
+// Check all open mailboxes and mark them as late if end date has passed
+void CheckMailboxLateStatus()
+{
+    time_t now = time(nullptr);
+    bool anyChanges = false;
+
+    for (auto& mb : mailboxes)
+    {
+        // Check mailboxes that are currently "Open" - mark as Late if end date passed
+        if (mb.status == MB_OPEN && mb.termEndDate > 0)
+        {
+            if (mb.termEndDate < now)
+            {
+                mb.status = MB_LATE;
+                anyChanges = true;
+            }
+        }
+        // Check mailboxes that are currently "Late" - restore to Open if end date is now in the future
+        else if (mb.status == MB_LATE && mb.termEndDate > 0)
+        {
+            if (mb.termEndDate >= now)
+            {
+                mb.status = MB_OPEN;
+                anyChanges = true;
+            }
+        }
+    }
+
+    // Save changes if any mailboxes were updated
+    if (anyChanges)
+    {
+        SaveMailboxesToCSV();
+    }
+}
+
+// Save mailboxes to CSV
+void SaveMailboxesToCSV()
+{
+    // Helper lambda to convert wstring to string
+    auto wstringToString = [](const std::wstring& wstr) -> std::string {
+        if (wstr.empty()) return "";
+        int size = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, nullptr, 0, nullptr, nullptr);
+        std::string str(size - 1, 0);
+        WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, &str[0], size, nullptr, nullptr);
+        return str;
+        };
+
+    // Helper to escape CSV fields (handles commas, quotes, newlines)
+    auto escapeCSV = [](const std::string& str) -> std::string {
+        bool needsQuotes = str.find(',') != std::string::npos ||
+            str.find('"') != std::string::npos ||
+            str.find('\n') != std::string::npos;
+        if (!needsQuotes) return str;
+
+        std::string escaped = "\"";
+        for (char c : str)
+        {
+            if (c == '"') escaped += "\"\"";
+            else escaped += c;
+        }
+        escaped += "\"";
+        return escaped;
+        };
+
+    std::ofstream file("mailboxes.csv");
+    if (file.is_open())
+    {
+        // Write header (no PII - holder names stored separately encrypted)
+        file << "BoxNumber,Status,TermStartDate,TermEndDate,HolderCount,Size,IsBusinessUse,BusinessName,AutoRenewal,Notes\n";
+
+        // Write mailboxes
+        for (const auto& mb : mailboxes)
+        {
+            file << mb.boxNumber << ","
+                << (int)mb.status << ","
+                << mb.termStartDate << ","
+                << mb.termEndDate << ","
+                << mb.holderCount << ","
+                << (int)mb.size << ","
+                << (mb.isBusinessUse ? 1 : 0) << ","
+                << escapeCSV(wstringToString(mb.businessName)) << ","
+                << (mb.autoRenewal ? 1 : 0) << ","
+                << escapeCSV(wstringToString(mb.notes)) << "\n";
+        }
+        file.close();
+    }
+}
+
+// Load mailboxes from CSV
+void LoadMailboxesFromCSV()
+{
+    // Helper lambda to convert string to wstring
+    auto stringToWstring = [](const std::string& str) -> std::wstring {
+        if (str.empty()) return L"";
+        int size = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, nullptr, 0);
+        std::wstring wstr(size - 1, 0);
+        MultiByteToWideChar(CP_UTF8, 0, str.c_str(), -1, &wstr[0], size);
+        return wstr;
+        };
+
+    // Helper to parse CSV line (handles quoted fields)
+    auto parseCSVLine = [](const std::string& line) -> std::vector<std::string> {
+        std::vector<std::string> fields;
+        std::string field;
+        bool inQuotes = false;
+
+        for (size_t i = 0; i < line.length(); i++)
+        {
+            char c = line[i];
+            if (c == '"')
+            {
+                if (inQuotes && i + 1 < line.length() && line[i + 1] == '"')
+                {
+                    field += '"';
+                    i++;
+                }
+                else
+                {
+                    inQuotes = !inQuotes;
+                }
+            }
+            else if (c == ',' && !inQuotes)
+            {
+                fields.push_back(field);
+                field.clear();
+            }
+            else
+            {
+                field += c;
+            }
+        }
+        fields.push_back(field);
+        return fields;
+        };
+
+    std::ifstream file("mailboxes.csv");
+    if (!file.is_open()) return;
+
+    std::string line;
+    bool isHeader = true;
+
+    while (std::getline(file, line))
+    {
+        if (isHeader) { isHeader = false; continue; }
+        if (line.empty()) continue;
+
+        Mailbox mb;
+        mb.autoRenewal = false;  // Default for old CSV files
+        mb.notes = L"";
+        // Initialize holder arrays
+        for (int j = 0; j < MAX_HOLDERS; j++)
+        {
+            mb.holderNames[j] = L"";
+            mb.holderHashes[j] = L"";
+        }
+
+        std::vector<std::string> fields = parseCSVLine(line);
+
+        if (fields.size() > 0) mb.boxNumber = std::stoi(fields[0]);
+        if (fields.size() > 1) mb.status = (MailboxStatus)std::stoi(fields[1]);
+        if (fields.size() > 2) mb.termStartDate = std::stoll(fields[2]);
+        if (fields.size() > 3) mb.termEndDate = std::stoll(fields[3]);
+        if (fields.size() > 4) mb.holderCount = std::stoi(fields[4]);
+        if (fields.size() > 5) mb.size = (MailboxSize)std::stoi(fields[5]);
+        if (fields.size() > 6) mb.isBusinessUse = (std::stoi(fields[6]) == 1);
+        if (fields.size() > 7) mb.businessName = stringToWstring(fields[7]);
+        if (fields.size() > 8) mb.autoRenewal = (std::stoi(fields[8]) == 1);
+        if (fields.size() > 9) mb.notes = stringToWstring(fields[9]);
+
+        mailboxes.push_back(mb);
+    }
+    file.close();
+}
+
+// Create mailbox management UI controls
+void CreateMailboxManagementControls(HWND hWnd)
+{
+    // Initialize mailboxes
+    InitializeMailboxes();
+
+    // Create search label
+    hMailboxSearchLabel = CreateWindowW(
+        L"STATIC", L"Search:",
+        WS_CHILD | SS_LEFT,
+        0, 0, 60, 25,
+        hWnd, (HMENU)IDC_MAILBOX_SEARCH_LABEL, hInst, nullptr);
+
+    // Create search box (matching inventory style - no WS_EX_CLIENTEDGE)
+    hMailboxSearchBox = CreateWindowW(
+        L"EDIT", L"",
+        WS_CHILD | WS_BORDER | ES_AUTOHSCROLL,
+        0, 0, 250, 25,
+        hWnd, (HMENU)IDC_MAILBOX_SEARCH_BOX, hInst, nullptr);
+
+    // Create mailbox ListView
+    hMailboxList = CreateWindowExW(
+        0,
+        WC_LISTVIEW, L"",
+        WS_CHILD | WS_BORDER | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+        0, 0, 100, 100,
+        hWnd, (HMENU)IDC_MAILBOX_LIST, hInst, nullptr);
+
+    // Disable Windows visual theme on ListView
+    SetWindowTheme(hMailboxList, L"", L"");
+
+    // Enable full row select
+    ListView_SetExtendedListViewStyle(hMailboxList,
+        LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+
+    // Set dark theme colors
+    ListView_SetBkColor(hMailboxList, RGB(45, 45, 50));
+    ListView_SetTextBkColor(hMailboxList, RGB(45, 45, 50));
+    ListView_SetTextColor(hMailboxList, RGB(220, 220, 220));
+
+    // Set up columns
+    SetupMailboxListColumns(hMailboxList);
+
+    // Create details panel (static control that we'll paint on)
+    hMailboxDetailsPanel = CreateWindowW(
+        L"STATIC", L"",
+        WS_CHILD | SS_OWNERDRAW,
+        0, 0, 280, 400,
+        hWnd, (HMENU)IDC_MAILBOX_DETAILS_PANEL, hInst, nullptr);
+
+    // Create edit button
+    hMailboxEditBtn = CreateWindowW(
+        L"BUTTON", L"Edit Mailbox",
+        WS_CHILD | BS_OWNERDRAW,
+        0, 0, 120, 35,
+        hWnd, (HMENU)IDC_MAILBOX_EDIT_BTN, hInst, nullptr);
+    EnableWindow(hMailboxEditBtn, FALSE);  // Disabled until selection
+
+    // Create inline edit controls (initially hidden)
+    CreateMailboxEditControls(hWnd);
+
+    // Set fonts
+    HFONT hListFont = CreateFontW(
+        14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI"
+    );
+    SendMessage(hMailboxList, WM_SETFONT, (WPARAM)hListFont, TRUE);
+    SendMessage(hMailboxSearchBox, WM_SETFONT, (WPARAM)hListFont, TRUE);
+    SendMessage(hMailboxSearchLabel, WM_SETFONT, (WPARAM)hListFont, TRUE);
+
+    // Also set font on edit controls
+    SendMessage(hMbEditStatus, WM_SETFONT, (WPARAM)hListFont, TRUE);
+    SendMessage(hMbEditStart, WM_SETFONT, (WPARAM)hListFont, TRUE);
+    SendMessage(hMbEditEnd, WM_SETFONT, (WPARAM)hListFont, TRUE);
+    SendMessage(hMbEditSize, WM_SETFONT, (WPARAM)hListFont, TRUE);
+    SendMessage(hMbEditUseType, WM_SETFONT, (WPARAM)hListFont, TRUE);
+    SendMessage(hMbEditBusiness, WM_SETFONT, (WPARAM)hListFont, TRUE);
+    SendMessage(hMbEditHolders, WM_SETFONT, (WPARAM)hListFont, TRUE);
+    SendMessage(hMbEditNotes, WM_SETFONT, (WPARAM)hListFont, TRUE);
+    for (int i = 0; i < MAX_HOLDERS; i++)
+    {
+        SendMessage(hMbEditHolderNames[i], WM_SETFONT, (WPARAM)hListFont, TRUE);
+    }
+
+    // Populate the list
+    RefreshMailboxList();
+}
+
+// Setup mailbox list columns
+void SetupMailboxListColumns(HWND hListView)
+{
+    LVCOLUMN lvc;
+    lvc.mask = LVCF_FMT | LVCF_WIDTH | LVCF_TEXT | LVCF_SUBITEM;
+
+    // Column 0: Box Number
+    lvc.iSubItem = 0;
+    lvc.pszText = (LPWSTR)L"Box #";
+    lvc.cx = 70;
+    lvc.fmt = LVCFMT_LEFT;
+    ListView_InsertColumn(hListView, 0, &lvc);
+
+    // Column 1: Status
+    lvc.iSubItem = 1;
+    lvc.pszText = (LPWSTR)L"Status";
+    lvc.cx = 70;
+    lvc.fmt = LVCFMT_LEFT;
+    ListView_InsertColumn(hListView, 1, &lvc);
+
+    // Column 2: Start Date
+    lvc.iSubItem = 2;
+    lvc.pszText = (LPWSTR)L"Start Date";
+    lvc.cx = 90;
+    lvc.fmt = LVCFMT_LEFT;
+    ListView_InsertColumn(hListView, 2, &lvc);
+
+    // Column 3: End Date
+    lvc.iSubItem = 3;
+    lvc.pszText = (LPWSTR)L"End Date";
+    lvc.cx = 90;
+    lvc.fmt = LVCFMT_LEFT;
+    ListView_InsertColumn(hListView, 3, &lvc);
+
+    // Column 4: Holders
+    lvc.iSubItem = 4;
+    lvc.pszText = (LPWSTR)L"Holders";
+    lvc.cx = 70;
+    lvc.fmt = LVCFMT_LEFT;
+    ListView_InsertColumn(hListView, 4, &lvc);
+
+    // Column 5: Auto-Renewal (checkmark when enabled)
+    lvc.iSubItem = 5;
+    lvc.pszText = (LPWSTR)L"Auto-Renew";
+    lvc.cx = 90;
+    lvc.fmt = LVCFMT_LEFT;
+    ListView_InsertColumn(hListView, 5, &lvc);
+
+    // Column 6: Notes
+    lvc.iSubItem = 6;
+    lvc.pszText = (LPWSTR)L"Notes";
+    lvc.cx = 150;
+    lvc.fmt = LVCFMT_LEFT;
+    ListView_InsertColumn(hListView, 6, &lvc);
+}
+
+// Show or hide mailbox controls
+void ShowMailboxControls(bool show)
+{
+    int showCmd = show ? SW_SHOW : SW_HIDE;
+    ShowWindow(hMailboxList, showCmd);
+    ShowWindow(hMailboxDetailsPanel, showCmd);
+    ShowWindow(hMailboxSearchBox, showCmd);
+    ShowWindow(hMailboxSearchLabel, showCmd);
+
+    if (show)
+    {
+        // In view mode: show edit button and reveal button (when mailbox selected)
+        // In edit mode: hide both (edit controls have their own reveal button)
+        if (mailboxEditMode)
+        {
+            ShowWindow(hMailboxEditBtn, SW_HIDE);
+            ShowWindow(hMbRevealBtn, SW_HIDE);  // Edit mode has inline reveal
+        }
+        else
+        {
+            ShowWindow(hMailboxEditBtn, SW_SHOW);
+            // Show reveal button only when a mailbox is selected
+            ShowWindow(hMbRevealBtn, (selectedMailboxIndex >= 0) ? SW_SHOW : SW_HIDE);
+        }
+    }
+    else
+    {
+        // Hiding mailbox controls - cancel edit mode if active
+        if (mailboxEditMode)
+        {
+            ExitMailboxEditMode(false);
+        }
+        ShowWindow(hMailboxEditBtn, SW_HIDE);
+        ShowWindow(hMbRevealBtn, SW_HIDE);
+    }
+
+    // Always hide edit controls when hiding mailbox controls
+    // (they'll be shown by EnterMailboxEditMode when needed)
+    if (!show)
+    {
+        ShowMailboxEditControls(false);
+    }
+}
+
+// Refresh mailbox list with current filter and sort
+void RefreshMailboxList()
+{
+    // Disable redrawing to prevent flicker
+    SendMessage(hMailboxList, WM_SETREDRAW, FALSE, 0);
+
+    ListView_DeleteAllItems(hMailboxList);
+
+    // Build filtered and sorted list
+    std::vector<std::pair<int, Mailbox*>> filteredItems;
+
+    // Pre-compute search hash if we have a filter
+    std::wstring searchHash;
+    if (!mailboxSearchFilter.empty())
+    {
+        searchHash = HashStringForSearch(mailboxSearchFilter);
+    }
+
+    for (size_t i = 0; i < mailboxes.size(); i++)
+    {
+        Mailbox& mb = mailboxes[i];
+
+        // Apply search filter
+        if (!mailboxSearchFilter.empty())
+        {
+            std::wstring boxNumStr = std::to_wstring(mb.boxNumber);
+            std::wstring statusStr = GetMailboxStatusString(mb.status);
+            std::wstring businessName = mb.businessName;
+            std::wstring notes = mb.notes;
+
+            // Convert filter to lowercase for case-insensitive search
+            std::wstring filterLower = mailboxSearchFilter;
+            std::transform(filterLower.begin(), filterLower.end(), filterLower.begin(), ::towlower);
+
+            bool matches = false;
+
+            // Check box number
+            if (boxNumStr.find(mailboxSearchFilter) != std::wstring::npos) matches = true;
+
+            // Check status
+            std::wstring statusLower = statusStr;
+            std::transform(statusLower.begin(), statusLower.end(), statusLower.begin(), ::towlower);
+            if (statusLower.find(filterLower) != std::wstring::npos) matches = true;
+
+            // Check holder names via hash comparison (secure search)
+            for (int j = 0; j < mb.holderCount && j < MAX_HOLDERS; j++)
+            {
+                if (!mb.holderHashes[j].empty() && mb.holderHashes[j] == searchHash)
+                {
+                    matches = true;
+                    break;
+                }
+            }
+
+            // Check business name
+            std::wstring businessLower = businessName;
+            std::transform(businessLower.begin(), businessLower.end(), businessLower.begin(), ::towlower);
+            if (businessLower.find(filterLower) != std::wstring::npos) matches = true;
+
+            // Check notes
+            std::wstring notesLower = notes;
+            std::transform(notesLower.begin(), notesLower.end(), notesLower.begin(), ::towlower);
+            if (notesLower.find(filterLower) != std::wstring::npos) matches = true;
+
+            if (!matches) continue;
+        }
+
+        filteredItems.push_back({ (int)i, &mb });
+    }
+
+    // Sort if needed
+    if (mailboxSortColumn >= 0)
+    {
+        std::sort(filteredItems.begin(), filteredItems.end(),
+            [](const std::pair<int, Mailbox*>& a, const std::pair<int, Mailbox*>& b) {
+                int cmp = 0;
+                switch (mailboxSortColumn)
+                {
+                case 0: // Box Number
+                    cmp = a.second->boxNumber - b.second->boxNumber;
+                    break;
+                case 1: // Status
+                    cmp = (int)a.second->status - (int)b.second->status;
+                    break;
+                case 2: // Start Date
+                    if (a.second->termStartDate < b.second->termStartDate) cmp = -1;
+                    else if (a.second->termStartDate > b.second->termStartDate) cmp = 1;
+                    break;
+                case 3: // End Date
+                    if (a.second->termEndDate < b.second->termEndDate) cmp = -1;
+                    else if (a.second->termEndDate > b.second->termEndDate) cmp = 1;
+                    break;
+                case 4: // Holders
+                    cmp = a.second->holderCount - b.second->holderCount;
+                    break;
+                case 5: // Auto-Renewal
+                    cmp = (int)a.second->autoRenewal - (int)b.second->autoRenewal;
+                    break;
+                case 6: // Notes
+                    cmp = a.second->notes.compare(b.second->notes);
+                    break;
+                }
+                return mailboxSortAscending ? (cmp < 0) : (cmp > 0);
+            });
+    }
+
+    // Add items to ListView
+    int rowIndex = 0;
+    for (const auto& pair : filteredItems)
+    {
+        const Mailbox& mb = *pair.second;
+
+        // Insert the item
+        LVITEM lvi = { 0 };
+        lvi.mask = LVIF_TEXT | LVIF_PARAM;
+        lvi.iItem = rowIndex;
+        lvi.iSubItem = 0;
+        std::wstring boxNumStr = std::to_wstring(mb.boxNumber);
+        lvi.pszText = (LPWSTR)boxNumStr.c_str();
+        lvi.lParam = pair.first;  // Store original index
+        ListView_InsertItem(hMailboxList, &lvi);
+
+        // Status column
+        std::wstring statusStr = GetMailboxStatusString(mb.status);
+        ListView_SetItemText(hMailboxList, rowIndex, 1, (LPWSTR)statusStr.c_str());
+
+        // Start Date column
+        std::wstring startDateStr = (mb.status != MB_CLOSED && mb.termStartDate > 0)
+            ? FormatDateShort(mb.termStartDate) : L"--";
+        ListView_SetItemText(hMailboxList, rowIndex, 2, (LPWSTR)startDateStr.c_str());
+
+        // End Date column
+        std::wstring endDateStr = (mb.termEndDate > 0)
+            ? FormatDateShort(mb.termEndDate) : L"--";
+        ListView_SetItemText(hMailboxList, rowIndex, 3, (LPWSTR)endDateStr.c_str());
+
+        // Holders column
+        std::wstring holdersStr = std::to_wstring(mb.holderCount);
+        ListView_SetItemText(hMailboxList, rowIndex, 4, (LPWSTR)holdersStr.c_str());
+
+        // Auto-Renewal column (checkmark if enabled, empty if not)
+        std::wstring autoRenewStr = mb.autoRenewal ? L"\u2713" : L"";  // Unicode checkmark
+        ListView_SetItemText(hMailboxList, rowIndex, 5, (LPWSTR)autoRenewStr.c_str());
+
+        // Notes column (truncate if too long for display)
+        std::wstring notesDisplay = mb.notes;
+        if (notesDisplay.length() > 50)
+            notesDisplay = notesDisplay.substr(0, 47) + L"...";
+        ListView_SetItemText(hMailboxList, rowIndex, 6, (LPWSTR)notesDisplay.c_str());
+
+        rowIndex++;
+    }
+
+    // Re-enable redrawing and refresh
+    SendMessage(hMailboxList, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(hMailboxList, NULL, TRUE);
+
+    // Clear selection
+    selectedMailboxIndex = -1;
+    EnableWindow(hMailboxEditBtn, FALSE);
+    UpdateMailboxDetailsPanel();
+}
+
+// Sort mailbox list by column
+void SortMailboxList(int column)
+{
+    if (mailboxSortColumn == column)
+    {
+        mailboxSortAscending = !mailboxSortAscending;
+    }
+    else
+    {
+        mailboxSortColumn = column;
+        mailboxSortAscending = true;
+    }
+    RefreshMailboxList();
+}
+
+// Filter mailbox list
+void FilterMailboxList(const std::wstring& filter)
+{
+    mailboxSearchFilter = filter;
+    RefreshMailboxList();
+}
+
+// Resize last mailbox column to fill remaining width
+void ResizeMailboxLastColumn()
+{
+    if (!hMailboxList) return;
+
+    RECT listRect;
+    GetClientRect(hMailboxList, &listRect);
+    int listWidth = listRect.right - listRect.left;
+
+    // Calculate total width of columns 0-5
+    int usedWidth = 0;
+    for (int i = 0; i < 6; i++)
+    {
+        usedWidth += ListView_GetColumnWidth(hMailboxList, i);
+    }
+
+    // Set last column (6 - Notes) to fill remaining space
+    int lastColWidth = listWidth - usedWidth - 4;
+    if (lastColWidth < 100) lastColWidth = 100;
+
+    ListView_SetColumnWidth(hMailboxList, 6, lastColWidth);
+}
+
+// Update the details panel with selected mailbox info
+void UpdateMailboxDetailsPanel()
+{
+    // Reset revealed state when selection changes (in view mode)
+    if (!mailboxEditMode)
+    {
+        holderNamesRevealed = false;
+        SetWindowTextW(hMbRevealBtn, L"Show");
+        // Show/hide reveal button based on selection
+        ShowWindow(hMbRevealBtn, (selectedMailboxIndex >= 0) ? SW_SHOW : SW_HIDE);
+    }
+    InvalidateRect(hMailboxDetailsPanel, NULL, TRUE);
+}
+
+// Create the inline edit controls for mailbox editing
+void CreateMailboxEditControls(HWND hWnd)
+{
+    // Status combo box
+    hMbEditStatus = CreateWindowW(
+        L"COMBOBOX", L"",
+        WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL,
+        0, 0, 120, 100,
+        hWnd, (HMENU)IDC_MB_EDIT_STATUS, hInst, nullptr);
+    SendMessageW(hMbEditStatus, CB_ADDSTRING, 0, (LPARAM)L"Closed");
+    SendMessageW(hMbEditStatus, CB_ADDSTRING, 0, (LPARAM)L"Open");
+    SendMessageW(hMbEditStatus, CB_ADDSTRING, 0, (LPARAM)L"Late");
+
+    // Start date picker (DTS_SHOWNONE allows "no date" state)
+    hMbEditStart = CreateWindowExW(
+        0,
+        DATETIMEPICK_CLASSW, L"",
+        WS_CHILD | DTS_SHORTDATECENTURYFORMAT | DTS_SHOWNONE,
+        0, 0, 140, 24,
+        hWnd, (HMENU)IDC_MB_EDIT_START, hInst, nullptr);
+
+    // End date picker
+    hMbEditEnd = CreateWindowExW(
+        0,
+        DATETIMEPICK_CLASSW, L"",
+        WS_CHILD | DTS_SHORTDATECENTURYFORMAT | DTS_SHOWNONE,
+        0, 0, 140, 24,
+        hWnd, (HMENU)IDC_MB_EDIT_END, hInst, nullptr);
+
+    // Size combo box
+    hMbEditSize = CreateWindowW(
+        L"COMBOBOX", L"",
+        WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL,
+        0, 0, 120, 100,
+        hWnd, (HMENU)IDC_MB_EDIT_SIZE, hInst, nullptr);
+    SendMessageW(hMbEditSize, CB_ADDSTRING, 0, (LPARAM)L"Small");
+    SendMessageW(hMbEditSize, CB_ADDSTRING, 0, (LPARAM)L"Medium");
+    SendMessageW(hMbEditSize, CB_ADDSTRING, 0, (LPARAM)L"Large");
+
+    // Use type combo box
+    hMbEditUseType = CreateWindowW(
+        L"COMBOBOX", L"",
+        WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL,
+        0, 0, 120, 100,
+        hWnd, (HMENU)IDC_MB_EDIT_USETYPE, hInst, nullptr);
+    SendMessageW(hMbEditUseType, CB_ADDSTRING, 0, (LPARAM)L"Personal");
+    SendMessageW(hMbEditUseType, CB_ADDSTRING, 0, (LPARAM)L"Business");
+
+    // Business name edit box
+    hMbEditBusiness = CreateWindowExW(
+        WS_EX_CLIENTEDGE,
+        L"EDIT", L"",
+        WS_CHILD | ES_AUTOHSCROLL,
+        0, 0, 120, 22,
+        hWnd, (HMENU)IDC_MB_EDIT_BUSINESS, hInst, nullptr);
+
+    // Holder count combo box (1-10)
+    hMbEditHolders = CreateWindowW(
+        L"COMBOBOX", L"",
+        WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL,
+        0, 0, 60, 200,
+        hWnd, (HMENU)IDC_MB_EDIT_HOLDERS, hInst, nullptr);
+    for (int i = 1; i <= MAX_HOLDERS; i++)
+    {
+        SendMessageW(hMbEditHolders, CB_ADDSTRING, 0, (LPARAM)std::to_wstring(i).c_str());
+    }
+
+    // Auto-renewal checkbox
+    hMbEditAutoRenew = CreateWindowW(
+        L"BUTTON", L"",
+        WS_CHILD | BS_AUTOCHECKBOX,
+        0, 0, 20, 20,
+        hWnd, (HMENU)IDC_MB_EDIT_AUTORENEW, hInst, nullptr);
+
+    // Notes edit box
+    hMbEditNotes = CreateWindowExW(
+        WS_EX_CLIENTEDGE,
+        L"EDIT", L"",
+        WS_CHILD | ES_AUTOHSCROLL,
+        0, 0, 120, 22,
+        hWnd, (HMENU)IDC_MB_EDIT_NOTES, hInst, nullptr);
+
+    // Reveal/Hide names button
+    hMbRevealBtn = CreateWindowW(
+        L"BUTTON", L"Show Names",
+        WS_CHILD | BS_OWNERDRAW,
+        0, 0, 100, 25,
+        hWnd, (HMENU)IDC_MB_REVEAL_BTN, hInst, nullptr);
+
+    // Create holder name edit boxes (initially hidden)
+    for (int i = 0; i < MAX_HOLDERS; i++)
+    {
+        hMbEditHolderNames[i] = CreateWindowExW(
+            WS_EX_CLIENTEDGE,
+            L"EDIT", L"",
+            WS_CHILD | ES_AUTOHSCROLL,
+            0, 0, 150, 22,
+            hWnd, (HMENU)(IDC_MB_EDIT_HOLDER_BASE + i), hInst, nullptr);
+    }
+
+    // Save button
+    hMbSaveBtn = CreateWindowW(
+        L"BUTTON", L"Save",
+        WS_CHILD | BS_OWNERDRAW,
+        0, 0, 80, 30,
+        hWnd, (HMENU)IDC_MB_SAVE_BTN, hInst, nullptr);
+
+    // Cancel button
+    hMbCancelBtn = CreateWindowW(
+        L"BUTTON", L"Cancel",
+        WS_CHILD | BS_OWNERDRAW,
+        0, 0, 80, 30,
+        hWnd, (HMENU)IDC_MB_CANCEL_BTN, hInst, nullptr);
+}
+
+// Show or hide mailbox edit controls
+void ShowMailboxEditControls(bool show)
+{
+    int showCmd = show ? SW_SHOW : SW_HIDE;
+    ShowWindow(hMbEditStatus, showCmd);
+    ShowWindow(hMbEditStart, showCmd);
+    ShowWindow(hMbEditEnd, showCmd);
+    ShowWindow(hMbEditSize, showCmd);
+    ShowWindow(hMbEditUseType, showCmd);
+    ShowWindow(hMbEditBusiness, showCmd);
+    ShowWindow(hMbEditHolders, showCmd);
+    ShowWindow(hMbEditAutoRenew, showCmd);
+    ShowWindow(hMbEditNotes, showCmd);
+    ShowWindow(hMbSaveBtn, showCmd);
+    ShowWindow(hMbCancelBtn, showCmd);
+
+    // Reveal button is shown in edit mode (inline), hidden when exiting edit mode
+    // (view mode positioning is handled by RepositionControls)
+    if (show)
+    {
+        ShowWindow(hMbRevealBtn, SW_SHOW);
+    }
+
+    // Holder name fields - show/hide based on holder count
+    if (show)
+    {
+        int count = (int)SendMessageW(hMbEditHolders, CB_GETCURSEL, 0, 0) + 1;
+        UpdateHolderFieldsVisibility(count);
+    }
+    else
+    {
+        for (int i = 0; i < MAX_HOLDERS; i++)
+        {
+            ShowWindow(hMbEditHolderNames[i], SW_HIDE);
+        }
+    }
+}
+
+// Parse date string (MM/DD/YY) to time_t
+time_t ParseDateString(const std::wstring& dateStr)
+{
+    if (dateStr.empty() || dateStr == L"--") return 0;
+
+    int month = 0, day = 0, year = 0;
+    if (swscanf_s(dateStr.c_str(), L"%d/%d/%d", &month, &day, &year) != 3)
+        return 0;
+
+    // Handle 2-digit year
+    if (year < 100) year += 2000;
+
+    struct tm timeinfo = { 0 };
+    timeinfo.tm_year = year - 1900;
+    timeinfo.tm_mon = month - 1;
+    timeinfo.tm_mday = day;
+    timeinfo.tm_hour = 12;  // Noon to avoid DST issues
+
+    return mktime(&timeinfo);
+}
+
+// Enter edit mode for the selected mailbox
+void EnterMailboxEditMode()
+{
+    if (selectedMailboxIndex < 0) return;
+
+    // Get the actual mailbox index
+    LVITEM lvi = { 0 };
+    lvi.mask = LVIF_PARAM;
+    lvi.iItem = selectedMailboxIndex;
+    ListView_GetItem(hMailboxList, &lvi);
+    editingMailboxActualIndex = (int)lvi.lParam;
+
+    if (editingMailboxActualIndex < 0 || editingMailboxActualIndex >= (int)mailboxes.size())
+        return;
+
+    Mailbox& mb = mailboxes[editingMailboxActualIndex];
+
+    // Reset reveal state
+    holderNamesRevealed = false;
+    SetWindowTextW(hMbRevealBtn, L"Show Names");
+
+    // Populate edit controls with current values
+    SendMessageW(hMbEditStatus, CB_SETCURSEL, (int)mb.status, 0);
+
+    // Set start date picker
+    if (mb.termStartDate > 0)
+    {
+        struct tm timeinfo;
+        localtime_s(&timeinfo, &mb.termStartDate);
+        SYSTEMTIME st = { 0 };
+        st.wYear = (WORD)(timeinfo.tm_year + 1900);
+        st.wMonth = (WORD)(timeinfo.tm_mon + 1);
+        st.wDay = (WORD)timeinfo.tm_mday;
+        DateTime_SetSystemtime(hMbEditStart, GDT_VALID, &st);
+    }
+    else
+    {
+        DateTime_SetSystemtime(hMbEditStart, GDT_NONE, NULL);
+    }
+
+    // Set end date picker
+    if (mb.termEndDate > 0)
+    {
+        struct tm timeinfo;
+        localtime_s(&timeinfo, &mb.termEndDate);
+        SYSTEMTIME st = { 0 };
+        st.wYear = (WORD)(timeinfo.tm_year + 1900);
+        st.wMonth = (WORD)(timeinfo.tm_mon + 1);
+        st.wDay = (WORD)timeinfo.tm_mday;
+        DateTime_SetSystemtime(hMbEditEnd, GDT_VALID, &st);
+    }
+    else
+    {
+        DateTime_SetSystemtime(hMbEditEnd, GDT_NONE, NULL);
+    }
+
+    SendMessageW(hMbEditSize, CB_SETCURSEL, (int)mb.size, 0);
+    SendMessageW(hMbEditUseType, CB_SETCURSEL, mb.isBusinessUse ? 1 : 0, 0);
+    SetWindowTextW(hMbEditBusiness, mb.businessName.c_str());
+
+    // Holder count (combo box is 0-indexed, so subtract 1)
+    int holderIdx = mb.holderCount - 1;
+    if (holderIdx < 0) holderIdx = 0;
+    if (holderIdx >= MAX_HOLDERS) holderIdx = MAX_HOLDERS - 1;
+    SendMessageW(hMbEditHolders, CB_SETCURSEL, holderIdx, 0);
+
+    // Populate holder name fields (masked initially)
+    for (int i = 0; i < MAX_HOLDERS; i++)
+    {
+        if (i < mb.holderCount && !mb.holderNames[i].empty())
+        {
+            SetWindowTextW(hMbEditHolderNames[i], MaskName(mb.holderNames[i]).c_str());
+        }
+        else
+        {
+            SetWindowTextW(hMbEditHolderNames[i], L"");
+        }
+    }
+
+    SendMessageW(hMbEditAutoRenew, BM_SETCHECK, mb.autoRenewal ? BST_CHECKED : BST_UNCHECKED, 0);
+    SetWindowTextW(hMbEditNotes, mb.notes.c_str());
+
+    mailboxEditMode = true;
+
+    // Position and show edit controls
+    PositionMailboxEditControls();
+    ShowMailboxEditControls(true);
+
+    // Hide the details panel background (we'll show edit controls instead)
+    InvalidateRect(hMailboxDetailsPanel, NULL, TRUE);
+
+    // Hide the edit button, show save/cancel
+    ShowWindow(hMailboxEditBtn, SW_HIDE);
+}
+
+// Exit edit mode, optionally saving changes
+void ExitMailboxEditMode(bool save)
+{
+    if (!mailboxEditMode) return;
+
+    if (save && editingMailboxActualIndex >= 0 && editingMailboxActualIndex < (int)mailboxes.size())
+    {
+        Mailbox& mb = mailboxes[editingMailboxActualIndex];
+
+        // Get values from controls
+        mb.status = (MailboxStatus)SendMessageW(hMbEditStatus, CB_GETCURSEL, 0, 0);
+
+        // Get start date from date picker
+        SYSTEMTIME st;
+        LRESULT result = DateTime_GetSystemtime(hMbEditStart, &st);
+        if (result == GDT_VALID)
+        {
+            struct tm timeinfo = { 0 };
+            timeinfo.tm_year = st.wYear - 1900;
+            timeinfo.tm_mon = st.wMonth - 1;
+            timeinfo.tm_mday = st.wDay;
+            timeinfo.tm_hour = 12;  // Noon to avoid DST issues
+            mb.termStartDate = mktime(&timeinfo);
+        }
+        else
+        {
+            mb.termStartDate = 0;
+        }
+
+        // Get end date from date picker
+        result = DateTime_GetSystemtime(hMbEditEnd, &st);
+        if (result == GDT_VALID)
+        {
+            struct tm timeinfo = { 0 };
+            timeinfo.tm_year = st.wYear - 1900;
+            timeinfo.tm_mon = st.wMonth - 1;
+            timeinfo.tm_mday = st.wDay;
+            timeinfo.tm_hour = 12;  // Noon to avoid DST issues
+            mb.termEndDate = mktime(&timeinfo);
+        }
+        else
+        {
+            mb.termEndDate = 0;
+        }
+
+        mb.size = (MailboxSize)SendMessageW(hMbEditSize, CB_GETCURSEL, 0, 0);
+        mb.isBusinessUse = (SendMessageW(hMbEditUseType, CB_GETCURSEL, 0, 0) == 1);
+
+        wchar_t buffer[512];
+        GetWindowTextW(hMbEditBusiness, buffer, 256);
+        mb.businessName = buffer;
+
+        // Get holder count from combo box (0-indexed, so add 1)
+        mb.holderCount = (int)SendMessageW(hMbEditHolders, CB_GETCURSEL, 0, 0) + 1;
+        if (mb.holderCount < 1) mb.holderCount = 1;
+        if (mb.holderCount > MAX_HOLDERS) mb.holderCount = MAX_HOLDERS;
+
+        // Get holder names - only save from fields if revealed (contains actual names)
+        // If not revealed, the fields contain masked text (dots) which we shouldn't save
+        if (holderNamesRevealed)
+        {
+            for (int i = 0; i < MAX_HOLDERS; i++)
+            {
+                if (i < mb.holderCount)
+                {
+                    GetWindowTextW(hMbEditHolderNames[i], buffer, 256);
+                    mb.holderNames[i] = buffer;
+                    mb.holderHashes[i] = HashStringForSearch(buffer);
+                }
+                else
+                {
+                    mb.holderNames[i] = L"";
+                    mb.holderHashes[i] = L"";
+                }
+            }
+        }
+        // If not revealed, existing names are kept (they're still in mb.holderNames)
+        // But we need to clear names for slots beyond the new holder count
+        else
+        {
+            for (int i = mb.holderCount; i < MAX_HOLDERS; i++)
+            {
+                mb.holderNames[i] = L"";
+                mb.holderHashes[i] = L"";
+            }
+        }
+
+        mb.autoRenewal = (SendMessageW(hMbEditAutoRenew, BM_GETCHECK, 0, 0) == BST_CHECKED);
+
+        GetWindowTextW(hMbEditNotes, buffer, 512);
+        mb.notes = buffer;
+
+        // Save to CSV (non-sensitive data)
+        SaveMailboxesToCSV();
+
+        // Save encrypted holder data
+        SaveSecureHolderData();
+
+        // Check for late status after saving (in case end date was set to past)
+        CheckMailboxLateStatus();
+
+        // Refresh the list
+        RefreshMailboxList();
+    }
+
+    mailboxEditMode = false;
+    editingMailboxActualIndex = -1;
+    holderNamesRevealed = false;
+
+    // Hide edit controls
+    ShowMailboxEditControls(false);
+
+    // Show the edit button again
+    ShowWindow(hMailboxEditBtn, SW_SHOW);
+
+    // Refresh the details panel
+    UpdateMailboxDetailsPanel();
+}
+
+// Position the inline edit controls within the details panel
+void PositionMailboxEditControls()
+{
+    RECT panelRect;
+    GetWindowRect(hMailboxDetailsPanel, &panelRect);
+
+    // Convert to parent coordinates
+    HWND hParent = GetParent(hMailboxDetailsPanel);
+    POINT pt = { panelRect.left, panelRect.top };
+    ScreenToClient(hParent, &pt);
+
+    int panelX = pt.x;
+    int panelY = pt.y;
+    int panelWidth = panelRect.right - panelRect.left;
+
+    int padding = 15;
+    int labelWidth = 100;
+    int controlX = panelX + labelWidth + 5;
+    int controlWidth = panelWidth - labelWidth - padding - 10;
+    int rowHeight = 26;
+    int controlHeight = 22;
+
+    // Start after title and separator (approximately)
+    int y = panelY + padding + rowHeight + 20;
+
+    // Status
+    SetWindowPos(hMbEditStatus, HWND_TOP, controlX, y, controlWidth, controlHeight + 100, SWP_NOZORDER);
+    y += rowHeight;
+
+    // Start Date
+    SetWindowPos(hMbEditStart, HWND_TOP, controlX, y, controlWidth, controlHeight, SWP_NOZORDER);
+    y += rowHeight;
+
+    // End Date
+    SetWindowPos(hMbEditEnd, HWND_TOP, controlX, y, controlWidth, controlHeight, SWP_NOZORDER);
+    y += rowHeight;
+
+    // Size
+    SetWindowPos(hMbEditSize, HWND_TOP, controlX, y, controlWidth, controlHeight + 100, SWP_NOZORDER);
+    y += rowHeight;
+
+    // Use Type
+    SetWindowPos(hMbEditUseType, HWND_TOP, controlX, y, controlWidth, controlHeight + 100, SWP_NOZORDER);
+    y += rowHeight;
+
+    // Business Name
+    SetWindowPos(hMbEditBusiness, HWND_TOP, controlX, y, controlWidth, controlHeight, SWP_NOZORDER);
+    y += rowHeight;
+
+    // Auto-Renewal checkbox
+    SetWindowPos(hMbEditAutoRenew, HWND_TOP, controlX, y, 20, 20, SWP_NOZORDER);
+    y += rowHeight;
+
+    // Notes
+    SetWindowPos(hMbEditNotes, HWND_TOP, controlX, y, controlWidth, controlHeight, SWP_NOZORDER);
+    y += rowHeight + 5;
+
+    // Holder Count (at the end now)
+    SetWindowPos(hMbEditHolders, HWND_TOP, controlX, y, 60, controlHeight + 100, SWP_NOZORDER);
+    // Reveal button next to holder count
+    SetWindowPos(hMbRevealBtn, HWND_TOP, controlX + 70, y, 90, controlHeight, SWP_NOZORDER);
+    y += rowHeight;
+
+    // Holder name fields (dynamically shown based on count)
+    int holderCount = (int)SendMessageW(hMbEditHolders, CB_GETCURSEL, 0, 0) + 1;
+    for (int i = 0; i < MAX_HOLDERS; i++)
+    {
+        SetWindowPos(hMbEditHolderNames[i], HWND_TOP, controlX, y + (i * rowHeight), controlWidth, controlHeight, SWP_NOZORDER);
+    }
+    y += holderCount * rowHeight + 10;
+
+    // Save and Cancel buttons
+    int btnWidth = 80;
+    int btnHeight = 30;
+    int btnSpacing = 10;
+    SetWindowPos(hMbSaveBtn, HWND_TOP, panelX + padding, y, btnWidth, btnHeight, SWP_NOZORDER);
+    SetWindowPos(hMbCancelBtn, HWND_TOP, panelX + padding + btnWidth + btnSpacing, y, btnWidth, btnHeight, SWP_NOZORDER);
+}
+
+// ==================== ENCRYPTION AND SECURITY FUNCTIONS ====================
+
+// Encrypt a string using Windows DPAPI (Data Protection API)
+// The encrypted data is tied to the current Windows user account
+std::wstring EncryptString(const std::wstring& plainText)
+{
+    if (plainText.empty()) return L"";
+
+    // Convert wstring to byte array
+    std::string utf8Text;
+    int size = WideCharToMultiByte(CP_UTF8, 0, plainText.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    utf8Text.resize(size - 1);
+    WideCharToMultiByte(CP_UTF8, 0, plainText.c_str(), -1, &utf8Text[0], size, nullptr, nullptr);
+
+    DATA_BLOB inputBlob;
+    inputBlob.pbData = (BYTE*)utf8Text.data();
+    inputBlob.cbData = (DWORD)utf8Text.size();
+
+    DATA_BLOB outputBlob;
+
+    // Encrypt using DPAPI - tied to current user
+    if (!CryptProtectData(&inputBlob, NULL, NULL, NULL, NULL, 0, &outputBlob))
+    {
+        return L"";
+    }
+
+    // Convert to base64 for storage
+    DWORD base64Len = 0;
+    CryptBinaryToStringW(outputBlob.pbData, outputBlob.cbData, CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, NULL, &base64Len);
+
+    std::wstring base64Result(base64Len, L'\0');
+    CryptBinaryToStringW(outputBlob.pbData, outputBlob.cbData, CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, &base64Result[0], &base64Len);
+
+    LocalFree(outputBlob.pbData);
+
+    // Remove any trailing null characters
+    while (!base64Result.empty() && base64Result.back() == L'\0')
+        base64Result.pop_back();
+
+    return base64Result;
+}
+
+// Decrypt a string that was encrypted with EncryptString
+std::wstring DecryptString(const std::wstring& encryptedBase64)
+{
+    if (encryptedBase64.empty()) return L"";
+
+    // Convert from base64
+    DWORD binaryLen = 0;
+    if (!CryptStringToBinaryW(encryptedBase64.c_str(), 0, CRYPT_STRING_BASE64, NULL, &binaryLen, NULL, NULL))
+    {
+        return L"";
+    }
+
+    std::vector<BYTE> binaryData(binaryLen);
+    if (!CryptStringToBinaryW(encryptedBase64.c_str(), 0, CRYPT_STRING_BASE64, binaryData.data(), &binaryLen, NULL, NULL))
+    {
+        return L"";
+    }
+
+    DATA_BLOB inputBlob;
+    inputBlob.pbData = binaryData.data();
+    inputBlob.cbData = binaryLen;
+
+    DATA_BLOB outputBlob;
+
+    // Decrypt using DPAPI
+    if (!CryptUnprotectData(&inputBlob, NULL, NULL, NULL, NULL, 0, &outputBlob))
+    {
+        return L"";
+    }
+
+    // Convert from UTF-8 to wstring
+    std::string utf8Text((char*)outputBlob.pbData, outputBlob.cbData);
+    LocalFree(outputBlob.pbData);
+
+    int wideLen = MultiByteToWideChar(CP_UTF8, 0, utf8Text.c_str(), -1, nullptr, 0);
+    std::wstring result(wideLen - 1, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, utf8Text.c_str(), -1, &result[0], wideLen);
+
+    return result;
+}
+
+// Create a searchable hash of a string (case-insensitive)
+// Uses a simple hash that allows partial matching by hashing each word separately
+std::wstring HashStringForSearch(const std::wstring& text)
+{
+    if (text.empty()) return L"";
+
+    // Convert to lowercase for case-insensitive search
+    std::wstring lowerText = text;
+    std::transform(lowerText.begin(), lowerText.end(), lowerText.begin(), ::towlower);
+
+    // Use Windows crypto to create a SHA-256 hash
+    HCRYPTPROV hProv = 0;
+    HCRYPTHASH hHash = 0;
+    std::wstring hashResult;
+
+    if (CryptAcquireContextW(&hProv, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT))
+    {
+        if (CryptCreateHash(hProv, CALG_SHA_256, 0, 0, &hHash))
+        {
+            // Convert to UTF-8 for hashing
+            std::string utf8Text;
+            int size = WideCharToMultiByte(CP_UTF8, 0, lowerText.c_str(), -1, nullptr, 0, nullptr, nullptr);
+            utf8Text.resize(size - 1);
+            WideCharToMultiByte(CP_UTF8, 0, lowerText.c_str(), -1, &utf8Text[0], size, nullptr, nullptr);
+
+            if (CryptHashData(hHash, (BYTE*)utf8Text.data(), (DWORD)utf8Text.size(), 0))
+            {
+                DWORD hashLen = 32;  // SHA-256 = 32 bytes
+                std::vector<BYTE> hashData(hashLen);
+
+                if (CryptGetHashParam(hHash, HP_HASHVAL, hashData.data(), &hashLen, 0))
+                {
+                    // Convert to hex string
+                    std::wstringstream ss;
+                    for (DWORD i = 0; i < hashLen; i++)
+                    {
+                        ss << std::hex << std::setfill(L'0') << std::setw(2) << (int)hashData[i];
+                    }
+                    hashResult = ss.str();
+                }
+            }
+            CryptDestroyHash(hHash);
+        }
+        CryptReleaseContext(hProv, 0);
+    }
+
+    return hashResult;
+}
+
+// Mask a name for display (e.g., "John Smith" -> "●●●● ●●●●●")
+std::wstring MaskName(const std::wstring& name)
+{
+    if (name.empty()) return L"";
+
+    std::wstring masked;
+    for (wchar_t c : name)
+    {
+        if (c == L' ')
+            masked += L' ';
+        else
+            masked += L'\u25CF';  // Black circle character
+    }
+    return masked;
+}
+
+// Save encrypted holder data to a separate secure file
+void SaveSecureHolderData()
+{
+    std::ofstream file("mailbox_holders.dat", std::ios::binary);
+    if (!file.is_open()) return;
+
+    // Helper to write a wstring
+    auto writeWString = [&file](const std::wstring& str) {
+        size_t len = str.length();
+        file.write((char*)&len, sizeof(len));
+        if (len > 0)
+            file.write((char*)str.c_str(), len * sizeof(wchar_t));
+        };
+
+    // Write number of mailboxes
+    size_t count = mailboxes.size();
+    file.write((char*)&count, sizeof(count));
+
+    for (const auto& mb : mailboxes)
+    {
+        // Write box number
+        file.write((char*)&mb.boxNumber, sizeof(mb.boxNumber));
+
+        // Write holder count
+        file.write((char*)&mb.holderCount, sizeof(mb.holderCount));
+
+        // Write each holder name (encrypted) and hash
+        for (int i = 0; i < MAX_HOLDERS; i++)
+        {
+            std::wstring encrypted = EncryptString(mb.holderNames[i]);
+            writeWString(encrypted);
+            writeWString(mb.holderHashes[i]);
+        }
+    }
+
+    file.close();
+}
+
+// Load encrypted holder data from the secure file
+void LoadSecureHolderData()
+{
+    std::ifstream file("mailbox_holders.dat", std::ios::binary);
+    if (!file.is_open()) return;
+
+    // Helper to read a wstring
+    auto readWString = [&file]() -> std::wstring {
+        size_t len = 0;
+        file.read((char*)&len, sizeof(len));
+        if (len == 0) return L"";
+        std::wstring str(len, L'\0');
+        file.read((char*)&str[0], len * sizeof(wchar_t));
+        return str;
+        };
+
+    // Read number of mailboxes
+    size_t count = 0;
+    file.read((char*)&count, sizeof(count));
+
+    // Create a map of box numbers to holder data
+    std::map<int, std::pair<int, std::array<std::pair<std::wstring, std::wstring>, MAX_HOLDERS>>> holderData;
+
+    for (size_t i = 0; i < count && file.good(); i++)
+    {
+        int boxNumber = 0;
+        int holderCount = 0;
+        file.read((char*)&boxNumber, sizeof(boxNumber));
+        file.read((char*)&holderCount, sizeof(holderCount));
+
+        std::array<std::pair<std::wstring, std::wstring>, MAX_HOLDERS> holders;
+        for (int j = 0; j < MAX_HOLDERS; j++)
+        {
+            std::wstring encrypted = readWString();
+            std::wstring hash = readWString();
+            holders[j] = { encrypted, hash };
+        }
+
+        holderData[boxNumber] = { holderCount, holders };
+    }
+
+    file.close();
+
+    // Apply loaded data to mailboxes
+    for (auto& mb : mailboxes)
+    {
+        auto it = holderData.find(mb.boxNumber);
+        if (it != holderData.end())
+        {
+            mb.holderCount = it->second.first;
+            for (int i = 0; i < MAX_HOLDERS; i++)
+            {
+                std::wstring encrypted = it->second.second[i].first;
+                mb.holderNames[i] = DecryptString(encrypted);
+                mb.holderHashes[i] = it->second.second[i].second;
+            }
+        }
+    }
+}
+
+// Update holder name fields visibility based on holder count
+void UpdateHolderFieldsVisibility(int count)
+{
+    for (int i = 0; i < MAX_HOLDERS; i++)
+    {
+        if (hMbEditHolderNames[i])
+        {
+            ShowWindow(hMbEditHolderNames[i], (i < count) ? SW_SHOW : SW_HIDE);
+        }
+    }
+}
+
+// Toggle between showing masked and revealed holder names
+void ToggleHolderNamesReveal()
+{
+    holderNamesRevealed = !holderNamesRevealed;
+
+    if (mailboxEditMode)
+    {
+        // In edit mode, update the edit fields
+        if (editingMailboxActualIndex >= 0 && editingMailboxActualIndex < (int)mailboxes.size())
+        {
+            Mailbox& mb = mailboxes[editingMailboxActualIndex];
+
+            for (int i = 0; i < mb.holderCount && i < MAX_HOLDERS; i++)
+            {
+                if (hMbEditHolderNames[i])
+                {
+                    if (holderNamesRevealed)
+                    {
+                        SetWindowTextW(hMbEditHolderNames[i], mb.holderNames[i].c_str());
+                    }
+                    else
+                    {
+                        SetWindowTextW(hMbEditHolderNames[i], MaskName(mb.holderNames[i]).c_str());
+                    }
+                }
+            }
+        }
+    }
+    else
+    {
+        // In view mode, just redraw the details panel to show/hide names
+        InvalidateRect(hMailboxDetailsPanel, NULL, TRUE);
+    }
+
+    // Update button text
+    SetWindowTextW(hMbRevealBtn, holderNamesRevealed ? L"Hide" : L"Show");
+    InvalidateRect(hMbRevealBtn, NULL, TRUE);
 }
